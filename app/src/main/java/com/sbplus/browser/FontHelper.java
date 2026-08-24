@@ -49,20 +49,70 @@ public final class FontHelper {
     }
 
     // ============ 存取 ============
+    // 说明:isEnabled / selectedName / shouldApply 会在 TextView.setTypeface /
+    // setText / onDraw / View.onAttachedToWindow 这些每帧热路径上被调用,
+    // 原实现每次都要读 SharedPreferences,shouldApply 还会额外做一次
+    // File.exists() 磁盘 stat —— 这是滚动卡顿与发热的直接来源。
+    // 这里做内存缓存,由 SharedPreferences 变更监听失效,行为与原来一致。
+    private static volatile boolean sCfgReady;
+    private static volatile boolean sCfgEnabled;
+    private static volatile String sCfgSelected = "";
+    private static volatile String sCfgPath = "";
+    private static volatile boolean sCfgShouldApply;
+    private static SharedPreferences.OnSharedPreferenceChangeListener sCfgListener;
+
+    /** 让字体配置缓存失效(选择/开关变更后调用)。 */
+    public static void invalidateCache() { sCfgReady = false; }
+
+    private static void ensureCfg(Context ctx) {
+        if (sCfgReady) return;
+        synchronized (FontHelper.class) {
+            if (sCfgReady) return;
+            boolean en = false;
+            String sel = "";
+            String path = "";
+            try {
+                SharedPreferences p = sp(ctx);
+                en = p.getBoolean(KEY_ENABLED, false);
+                sel = p.getString(KEY_SELECTED, "");
+                if (sel == null) sel = "";
+                if (!sel.isEmpty()) {
+                    File f = new File(dir(ctx), sel);
+                    if (f.exists()) path = f.getAbsolutePath();
+                }
+                if (sCfgListener == null) {
+                    sCfgListener = new SharedPreferences.OnSharedPreferenceChangeListener() {
+                        @Override public void onSharedPreferenceChanged(SharedPreferences s, String k) {
+                            invalidateCache();
+                        }
+                    };
+                    p.registerOnSharedPreferenceChangeListener(sCfgListener);
+                }
+            } catch (Throwable ignored) {}
+            sCfgEnabled = en;
+            sCfgSelected = sel;
+            sCfgPath = path;
+            sCfgShouldApply = en && !path.isEmpty();
+            sCfgReady = true;
+        }
+    }
+
     public static boolean isEnabled(Context ctx) {
-        try { return sp(ctx).getBoolean(KEY_ENABLED, false); } catch (Throwable ignored) {}
+        try { ensureCfg(ctx); return sCfgEnabled; } catch (Throwable ignored) {}
         return false;
     }
     public static void setEnabled(Context ctx, boolean en) {
         try { sp(ctx).edit().putBoolean(KEY_ENABLED, en).apply(); } catch (Throwable ignored) {}
+        invalidateCache();
     }
 
     public static String selectedName(Context ctx) {
-        try { return sp(ctx).getString(KEY_SELECTED, ""); } catch (Throwable ignored) {}
+        try { ensureCfg(ctx); return sCfgSelected; } catch (Throwable ignored) {}
         return "";
     }
     public static void selectFont(Context ctx, String name) {
         try { sp(ctx).edit().putString(KEY_SELECTED, name == null ? "" : name).apply(); } catch (Throwable ignored) {}
+        invalidateCache();
     }
 
     /** 扫描字体目录，返回所有 *.ttf|otf 文件名，排序。 */
@@ -89,51 +139,20 @@ public final class FontHelper {
             File f = new File(dir(ctx), name);
             boolean ok = f.exists() && f.delete();
             if (ok && name.equals(selectedName(ctx))) selectFont(ctx, "");
+            if (ok) invalidateCache();
             return ok;
         } catch (Throwable ignored) { return false; }
     }
 
-    // ===== base64 缓存(供网页注入 data URI) =====
-    private static volatile String sBase64;
-    private static volatile String sBase64Key;
-    /** 同步读取选中字体文件并 base64 编码(带缓存)。超大文件会耗时——调用方应在后台线程执行。 */
-    public static String base64OfSelected(Context ctx) {
-        try {
-            String p = selectedPath(ctx);
-            if (p == null || p.isEmpty()) return null;
-            if (sBase64 != null && p.equals(sBase64Key)) return sBase64;
-            File f = new File(p);
-            if (!f.exists()) return null;
-            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-            java.io.InputStream in = new java.io.FileInputStream(f);
-            byte[] buf = new byte[65536];
-            int r;
-            while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
-            in.close();
-            String b64 = android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP);
-            synchronized (FontHelper.class) {
-                sBase64 = b64;
-                sBase64Key = p;
-            }
-            XposedBridgeLog("base64 ready len=" + b64.length());
-            return b64;
-        } catch (Throwable t) { XposedBridgeLog("base64 err: " + t); return null; }
-    }
-
     /** 当前选中字体的绝对路径，无则空。 */
     public static String selectedPath(Context ctx) {
-        String n = selectedName(ctx);
-        if (n == null || n.isEmpty()) return "";
-        File f = new File(dir(ctx), n);        return f.exists() ? f.getAbsolutePath() : "";
+        try { ensureCfg(ctx); return sCfgPath; } catch (Throwable ignored) {}
+        return "";
     }
 
-    /** 是否应用（开关开且选中文件存在）。 */
+    /** 是否应用（开关开且选中文件存在）。热路径:走内存缓存,不做磁盘 stat。 */
     public static boolean shouldApply(Context ctx) {
-        try {
-            if (!isEnabled(ctx)) return false;
-            String p = selectedPath(ctx);
-            return p != null && !p.isEmpty();
-        } catch (Throwable ignored) {}
+        try { ensureCfg(ctx); return sCfgShouldApply; } catch (Throwable ignored) {}
         return false;
     }
 

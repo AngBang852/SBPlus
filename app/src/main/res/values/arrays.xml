@@ -1,7 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- LSPosed 静态作用域：声明模块要 hook 的目标应用包名。
-         用户在 LSPosed 中启用模块时，会自动提示勾选这些作用域。 -->
+    <!-- LSPosed 作用域：声明模块要 hook 的目标应用包名。
+         用户在 LSPosed 中启用模块时，会自动提示勾选这些作用域。
+
+         注意：旧版 xposedscope 只是「推荐」——LSPosed 会把这些包排在列表前面
+         并支持「选择推荐应用」一键勾选，但其它应用仍会列出可选。
+         想让列表只显示这两个包(staticScope)必须迁到 LSPosed 新版模块格式
+         META-INF/xposed/(module.prop + scope.list + java_init.list)，
+         而该格式只对 libxposed 新 API 模块生效：实测把三件套加进来后
+         LSPosed 报 ClassNotFoundException，因为 java_init.list 指向的类
+         需实现 io.github.libxposed.XposedModule，而本模块基于旧
+         de.robv.android.xposed.IXposedHookLoadPackage。
+         迁移意味着重写全部 hook 注册与反射辅助调用，代价远超收益，故保持旧格式。 -->
     <string-array name="xposedscope">
         <item>com.sec.android.app.sbrowser</item>
         <item>com.sec.android.app.sbrowser.beta</item>
