@@ -55,20 +55,81 @@ public final class ThemeColorHelper {
 
     public static String prefName() { return "sbplus_prefs"; }
 
-    // ============ 读取 ============
+    // ============ 读取(带内存缓存) ============
+    // 主题着色发生在每个 View 的绑定/绘制路径上,原实现每个 TextView 都要做 10+ 次
+    // getSharedPreferences().getInt() —— 每次都要走 SharedPreferences 的同步锁,
+    // 在长列表滚动时是明显的 CPU 与发热来源。这里做一次性快照缓存,
+    // 由 OnSharedPreferenceChangeListener 在配置变更时失效,保证行为不变。
+    private static volatile int[] sSlotCache;
+    private static volatile boolean sMasterCache;
+    private static volatile boolean sAnySetCache;
+    private static volatile boolean sCacheReady;
+    private static SharedPreferences.OnSharedPreferenceChangeListener sPrefListener;
+
+    /** 让缓存失效,下次读取重新快照。 */
+    public static void invalidateCache() { sCacheReady = false; }
+
+    private static void ensureCache(Context ctx) {
+        if (sCacheReady) return;
+        synchronized (ThemeColorHelper.class) {
+            if (sCacheReady) return;
+            int[] arr = new int[KEYS.length];
+            boolean master = false;
+            boolean any = false;
+            try {
+                SharedPreferences sp = ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE);
+                for (int i = 0; i < KEYS.length; i++) {
+                    arr[i] = sp.getInt(KEYS[i], -1);
+                    if (arr[i] != -1) any = true;
+                }
+                master = sp.getBoolean(MASTER_KEY(), false);
+                if (sPrefListener == null) {
+                    sPrefListener = new SharedPreferences.OnSharedPreferenceChangeListener() {
+                        @Override public void onSharedPreferenceChanged(SharedPreferences p, String k) {
+                            invalidateCache();
+                        }
+                    };
+                    sp.registerOnSharedPreferenceChangeListener(sPrefListener);
+                }
+            } catch (Throwable ignored) {
+                for (int i = 0; i < arr.length; i++) arr[i] = -1;
+            }
+            sSlotCache = arr;
+            sMasterCache = master;
+            sAnySetCache = any;
+            sCacheReady = true;
+        }
+    }
+
     public static int getSlot(Context ctx, int slot) {
         try {
+            ensureCache(ctx);
+            int[] c = sSlotCache;
+            if (c != null && slot >= 0 && slot < c.length) return c[slot];
             return ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE).getInt(KEYS[slot], -1);
         } catch (Throwable t) { return -1; }
     }
+
+    /** 主开关是否开启(缓存)。 */
+    public static boolean masterEnabled(Context ctx) {
+        try { ensureCache(ctx); return sMasterCache; } catch (Throwable t) { return false; }
+    }
+
+    /** 是否至少有一个 slot 被自定义过(缓存,避免逐 slot 轮询)。 */
+    public static boolean anySlotSet(Context ctx) {
+        try { ensureCache(ctx); return sAnySetCache; } catch (Throwable t) { return false; }
+    }
+
     public static boolean isSet(Context ctx, int slot) { return getSlot(ctx, slot) != -1; }
     public static void setSlot(Context ctx, int slot, int color) {
         try { ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE).edit().putInt(KEYS[slot], color).apply(); }
         catch (Throwable ignored) {}
+        invalidateCache();
     }
     public static void clearSlot(Context ctx, int slot) {
         try { ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE).edit().putInt(KEYS[slot], -1).apply(); }
         catch (Throwable ignored) {}
+        invalidateCache();
     }
     /** 读 slot, 未设置返回 defaultValue. */
     public static int color(Context ctx, int slot, int def) {
@@ -84,6 +145,7 @@ public final class ThemeColorHelper {
     private static void setMasterEnabled(Context ctx, boolean on) {
         try { ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE).edit().putBoolean(MASTER_KEY(), on).apply(); }
         catch (Throwable ignored) {}
+        invalidateCache();
     }
 
     // ================= 设置入口条目 =================

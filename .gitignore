@@ -41,6 +41,10 @@ _secrets.txt
 # internal notes
 _DEV_NOTES.md
 _AUDIT.md
+_main_release_body.md
+
+# build logs (local diagnostics)
+build_*.txt
 
 # reference/test assets
 _ref/
