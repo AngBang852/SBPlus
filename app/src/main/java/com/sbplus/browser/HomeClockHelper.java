@@ -1,7 +1,7 @@
 package com.sbplus.browser;
 
 import android.content.Context;
-import android.content.SharedPreferences;
+
 
 /**
  * 主页时钟管理: 支持精确到秒, 自定义大小位置.

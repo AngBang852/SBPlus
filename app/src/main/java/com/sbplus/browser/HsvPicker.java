@@ -9,7 +9,7 @@ import android.graphics.Shader;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.EditText;
-import android.widget.ViewFlipper;
+
 
 /**
  * HsvPicker — 简单 HSV 色盘: 上方 SV(饱和-明度) 面, 下方色相条.

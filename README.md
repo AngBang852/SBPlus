@@ -35,6 +35,15 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 3. Set scope to **Samsung Internet** (`com.sec.android.app.sbrowser`) or Beta (`com.sec.android.app.sbrowser.beta`).
 4. Restart the browser (or device).
 
+### Supported Versions
+
+| Channel | Package | Version |
+|---------|---------|---------|
+| Stable | `com.sec.android.app.sbrowser` | 30.1.0.67+ |
+| Beta | `com.sec.android.app.sbrowser.beta` | 30.1.0.67+ |
+
+The module resolves obfuscated class/method names at runtime, so it generally adapts to newer browser versions automatically without a module update.
+
 ### Build
 
 ```bat
@@ -73,6 +82,15 @@ Re-resolution happens on every browser start, so after a browser update the modu
 3. 重启三星浏览器（或重启系统）
 
 > 作用域需要时可在 LSPosed 界面手动勾选。
+
+### 支持版本
+
+| 渠道 | 包名 | 版本 |
+|------|------|------|
+| 正式版 | `com.sec.android.app.sbrowser` | 30.1.0.67+ |
+| Beta 版 | `com.sec.android.app.sbrowser.beta` | 30.1.0.67+ |
+
+模块通过运行时自适应解析混淆类名/方法名，通常浏览器更新后无需更新模块即可自动适配。
 
 ### 已实现功能
 
