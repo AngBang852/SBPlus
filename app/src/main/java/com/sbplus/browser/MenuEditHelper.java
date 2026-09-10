@@ -146,9 +146,19 @@ public final class MenuEditHelper {
                     }
                 });
 
-            // onBindViewHolder(g1, I) after -> style the add cell, blank the fillers.
+            // onBindViewHolder(ViewHolder, I) after -> style the add cell, blank the fillers.
+            // ViewHolder 类名被 R8 混淆(旧版 g1),通过 onBindViewHolder 方法参数类型反推
+            Class<?> vhCls = null;
+            for (java.lang.reflect.Method m : adapterCls.getDeclaredMethods()) {
+                if ("onBindViewHolder".equals(m.getName()) && m.getParameterTypes().length == 2
+                        && m.getParameterTypes()[1] == int.class) {
+                    vhCls = m.getParameterTypes()[0];
+                    break;
+                }
+            }
+            if (vhCls == null) throw new ClassNotFoundException("ViewHolder for onBindViewHolder");
             XposedHelpers.findAndHookMethod(adapterCls, "onBindViewHolder",
-                    XposedHelpers.findClass("androidx.recyclerview.widget.g1", cl),
+                    vhCls,
                     int.class,
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {

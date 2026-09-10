@@ -6,9 +6,7 @@ import android.database.sqlite.SQLiteDatabase;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * CookieHelper — 直接读写三星浏览器引擎的 Chromium cookie 数据库

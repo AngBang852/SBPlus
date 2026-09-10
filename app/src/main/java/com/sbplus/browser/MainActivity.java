@@ -59,6 +59,63 @@ public class MainActivity extends Activity {
             }
         });
 
+        // 问题反馈（GitHub）：打开 Issues 页面并预填环境信息
+        TextView feedbackGithubView = findViewById(R.id.tv_feedback_github);
+        feedbackGithubView.setOnClickListener(v -> {
+            try {
+                StringBuilder body = new StringBuilder();
+                body.append("## 环境信息\n\n");
+                body.append("| 项目 | 值 |\n");
+                body.append("|------|----|\n");
+                body.append("| 模块版本 | ").append(BuildConfig.VERSION_NAME).append(" |\n");
+                try {
+                    android.content.pm.PackageInfo pi = getPackageManager()
+                            .getPackageInfo("com.sec.android.app.sbrowser", 0);
+                    body.append("| 浏览器版本 | ").append(pi.versionName).append(" |\n");
+                } catch (Exception ignored) {}
+                body.append("| 设备型号 | ").append(android.os.Build.BRAND).append(" ")
+                        .append(android.os.Build.MODEL).append(" |\n");
+                body.append("| Android 版本 | ").append(android.os.Build.VERSION.RELEASE)
+                        .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(") |\n");
+                body.append("\n## 问题描述\n\n");
+                body.append("<!-- 请在此描述您遇到的问题，包括复现步骤 -->\n");
+
+                String title = java.net.URLEncoder.encode("[反馈] ", "UTF-8");
+                String bodyEncoded = java.net.URLEncoder.encode(body.toString(), "UTF-8");
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://github.com/AngBang852/SBPlus/issues/new?title=" + title + "&body=" + bodyEncoded)));
+            } catch (Exception e) {
+                Toast.makeText(this, "无法打开反馈页面", Toast.LENGTH_SHORT).show();
+            }
+        });
+
+        // 问题反馈（邮件）：调起邮件客户端并预填环境信息
+        TextView feedbackEmailView = findViewById(R.id.tv_feedback_email);
+        feedbackEmailView.setOnClickListener(v -> {
+            try {
+                StringBuilder body = new StringBuilder();
+                body.append("模块版本: ").append(BuildConfig.VERSION_NAME).append("\n");
+                try {
+                    android.content.pm.PackageInfo pi = getPackageManager()
+                            .getPackageInfo("com.sec.android.app.sbrowser", 0);
+                    body.append("浏览器版本: ").append(pi.versionName).append("\n");
+                } catch (Exception ignored) {}
+                body.append("设备型号: ").append(android.os.Build.BRAND).append(" ")
+                        .append(android.os.Build.MODEL).append("\n");
+                body.append("Android 版本: ").append(android.os.Build.VERSION.RELEASE)
+                        .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n\n");
+                body.append("问题描述:\n");
+
+                Intent i = new Intent(Intent.ACTION_SENDTO);
+                i.setData(Uri.parse("mailto:poiuy865@foxmail.com"));
+                i.putExtra(Intent.EXTRA_SUBJECT, "[SBPlus 反馈]");
+                i.putExtra(Intent.EXTRA_TEXT, body.toString());
+                startActivity(i);
+            } catch (Exception e) {
+                Toast.makeText(this, "无法打开邮件应用", Toast.LENGTH_SHORT).show();
+            }
+        });
+
         // 版本号：点击手动检测更新（有更新弹窗确认下载）
         mVersionView.setOnClickListener(v -> checkUpdate(true));
 

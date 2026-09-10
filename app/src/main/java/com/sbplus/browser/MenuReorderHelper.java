@@ -8,7 +8,7 @@ import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.FrameLayout;
+
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 
@@ -90,7 +90,16 @@ public final class MenuReorderHelper {
         if (sRecycler == null || sCl == null || sRecycler == sProxiedRecycler) return;
         try {
             Object recycler = sRecycler;
-            Class<?> m0 = XposedHelpers.findClass("androidx.recyclerview.widget.M0", sCl);
+            Class<?> m0 = null;
+            try {
+                Class<?> rvCls = XposedHelpers.findClass("androidx.recyclerview.widget.RecyclerView", sCl);
+                for (java.lang.reflect.Method m : rvCls.getMethods()) {
+                    if ("addOnItemTouchListener".equals(m.getName()) && m.getParameterTypes().length == 1) {
+                        m0 = m.getParameterTypes()[0];
+                        break;
+                    }
+                }
+            } catch (Throwable ignored) {}
             if (m0 == null || !m0.isInterface()) {
                 XposedBridge.log("[SBPlus] M0 not an interface, reorder disabled");
                 return;

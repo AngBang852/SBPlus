@@ -48,6 +48,28 @@
             android:textColor="#1565C0"
             android:background="?android:attr/selectableItemBackground" />
 
+        <TextView
+            android:id="@+id/tv_feedback_github"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:padding="6dp"
+            android:text="问题反馈（GitHub）"
+            android:textSize="13sp"
+            android:textColor="#1565C0"
+            android:background="?android:attr/selectableItemBackground" />
+
+        <TextView
+            android:id="@+id/tv_feedback_email"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:padding="6dp"
+            android:text="问题反馈（邮件）"
+            android:textSize="13sp"
+            android:textColor="#1565C0"
+            android:background="?android:attr/selectableItemBackground" />
+
         <Button
             android:id="@+id/btn_open_settings"
             android:layout_width="match_parent"
