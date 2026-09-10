@@ -39,7 +39,7 @@
 
         <meta-data
             android:name="xposeddescription"
-            android:value="SBPlus - Samsung Browser enhancements (download bridge, and more)" />
+            android:value="SBPlus - Samsung Internet enhancement module (LSPosed): download bridge, media sniffer, userscript manager, UA spoofing, region switch, homepage beautify and more. | 三星浏览器增强模块（LSPosed）：下载桥接、媒体嗅探、油猴脚本、UA伪装、改区、主页美化等。" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />
