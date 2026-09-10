@@ -48,7 +48,7 @@ public class UpdateChecker {
     }
 
     private static final String TAG = "SBPlusUpdate";
-    private static final String REPO = "1012127092/SBPlus";
+    private static final String REPO = "AngBang852/SBPlus";
     private static final String LATEST_URL = "https://api.github.com/repos/" + REPO + "/releases/latest";
     private static final String REPO_PAGE = "https://github.com/" + REPO;
 
