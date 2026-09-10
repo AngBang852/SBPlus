@@ -40,7 +40,7 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 | Channel | Package | Version |
 |---------|---------|---------|
 | Stable | `com.sec.android.app.sbrowser` | 30.1.0.67+ |
-| Beta | `com.sec.android.app.sbrowser.beta` | 30.1.0.67+ |
+| Beta | `com.sec.android.app.sbrowser.beta` | 30.0.0.67 |
 
 The module resolves obfuscated class/method names at runtime, so it generally adapts to newer browser versions automatically without a module update.
 
@@ -88,7 +88,7 @@ Re-resolution happens on every browser start, so after a browser update the modu
 | 渠道 | 包名 | 版本 |
 |------|------|------|
 | 正式版 | `com.sec.android.app.sbrowser` | 30.1.0.67+ |
-| Beta 版 | `com.sec.android.app.sbrowser.beta` | 30.1.0.67+ |
+| Beta 版 | `com.sec.android.app.sbrowser.beta` | 30.0.0.67 |
 
 模块通过运行时自适应解析混淆类名/方法名，通常浏览器更新后无需更新模块即可自动适配。
 
@@ -185,42 +185,6 @@ gradle assembleDebug --no-daemon
 
 浏览器每次启动时都会重新解析适配，浏览器更新后无需模块更新即可自动适配新版本。
 
-### 更新记录
-
-#### 2.5.2
-
-- **主页 Logo / 时钟启动抖动修复**：`QuickAccessMainLayout` 的
-  `onFinishInflate`(+400ms) 与 `onAttachedToWindow`(+500ms) 原先各调一次
-  `refreshHomeLogoSection()` / `refreshHomeClock()`，而这两个方法会清掉配置指纹并
-  先移除再重建覆盖层——等于自己绕过了幂等短路，冷启动会连续重建三次。
-  改为调 `attachHomeLogo` / `attachHomeClock`：配置未变则指纹短路直接返回，
-  只有设置真的变更才重建。冷启动重建次数 3 → 1。
-- **跟随搜索框逻辑改为绝对锚点**：原实现每帧把搜索框位移量*累加*到
-  `translationY`，丢帧或基准重置都会漂移且无法自愈；
-  现在记一次基准位置，之后每帧 `translationY = 当前位置 - 基准`，漏帧也会回正。
-- **账户头像与「添加快捷方式」不再被主题色渲染**：新增 `NEVER_TINT_IDS`
-  （`account` / `news_feed_tab_add_button(_icon)` / `add_view_container` /
-  `add_item_icon`），并向上检查最多 4 层父容器 id——因为「添加」格子内部的
-  ImageView id 只是通用的 `icon`，仅靠自身 id 无法识别。
-  模块自己插入的「添加快捷方式」ImageButton 没有资源 id，改用 `TAG_NO_TINT`
-  标记排除。四条着色路径（`ensureIconTint` / `tintHomeIcon` /
-  `applyToolbarIconTint` / `forceApplyAllToolbarIcons`）同时生效。
-- **移除网页字体注入功能**：连同 `WebFontServer`（本地回环 HTTP 字体服务）与
-  `FontHelper` 的 base64 缓存一并删除，浏览器进程不再开监听端口。
-  技术上可以注入（实测 `document.fonts.status=loaded`，9MB 字体被内核完整拉取），
-  但无法稳定覆盖网页正文——站点自身 CSS 与内核字体回退会吃掉 `!important`，
-  多数页面复查为未生效。半生效状态不如不留。**模块自身 UI 字体不受影响。**
-- 清理死代码：`tintAddButtonPlus` / `getAllFields` / `dumpVectorNode`。
-
-> 关于 LSPosed 作用域列表：本模块 `xposedscope` 声明的两个包只是**推荐**，
-> LSPosed 会把它们排在前面并支持「选择推荐应用」，但其它应用仍会列出。
-> 想让列表只显示这两个包（`staticScope=true`）必须改用 LSPosed 新版模块格式
-> `META-INF/xposed/`（`module.prop` + `scope.list` + `java_init.list`），
-> 而该格式只对 **libxposed 新 API** 模块生效——实测加入三件套后 LSPosed 报
-> `ClassNotFoundException: com.sbplus.browser.MainHook`，因为 `java_init.list`
-> 指向的类需实现 `io.github.libxposed.XposedModule`，而本模块基于旧的
-> `de.robv.android.xposed.IXposedHookLoadPackage`。迁移等于重写全部 hook 注册与
-> 反射辅助调用，代价远超收益，故继续使用旧格式。
 
 ### 开发环境
 
