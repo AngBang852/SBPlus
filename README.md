@@ -76,9 +76,9 @@ Re-resolution happens on every browser start, so after a browser update the modu
 
 ### 框架说明
 
-- **目标框架：LSPosed**（接口兼容标准 Xposed API）
-- 模块入口：`resources/META-INF/xposed/java_init.list` → `com.sbplus.browser.MainModule` → `MainHook`
-- 兼容：LSPosed 可加载，老 Xposed / EdXposed 理论上也可加载
+- **目标框架：LSPosed**（基于 LSPosed 新 API `io.github.libxposed.api`，封装传统 Xposed 风格兼容层 `XC_MethodHook`）
+- 模块入口：`resources/META-INF/xposed/java_init.list` → `MainModule` → `MainHook`
+- 架构：`MainModule`（入口）→ `MainHook`（单核巨类，21 个功能隔离注册）+ 17 个辅助类
 
 ### 使用前提
 
