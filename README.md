@@ -24,7 +24,7 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 9. **Userscript Manager** — full built-in manager: list / add / save / delete / toggle, `.user.js` interception, source management, "update all", lightweight GM API, detail page + share import.
 10. **Bookmark Management** — import / export bookmarks (Chrome / Edge / Firefox HTML format), tree checkbox dialog.
 11. **Random UA** — 55 real UA strings with random rotation; supports platform/browser multi-select and custom parameters.
-12. **Media Sniffer & Download Engine** — multi-threaded download engine for m3u8/TVOD streams; sniff and download video/audio/image resources with tab-based select-all (video/audio/image independent). Built-in site parsers for **Bilibili DASH** (auto-pair video+audio into single MP4, 4K/1080P+/HDR), **Douyin / Kuaishou / Xiaohongshu / Weibo / AcFun / Toutiao** (SSR JSON extraction via script tag), and global platforms **YouTube** (itag resolution), **TikTok**, **X/Twitter**, **Instagram/Facebook** (performance CDN). Segmented video (m4s/ts) auto-remux to MP4 — instant, no transcoding bloat. Task progress bar, speed display, cancel support, configurable concurrency.
+12. **Media Sniffer & Download Engine** — multi-threaded download, tab-based by type (video/audio/image). Supports Bilibili DASH merge (4K/1080P+/HDR), Douyin/Kuaishou/Xiaohongshu/Weibo/AcFun/Toutiao, YouTube/TikTok/X/Instagram/Facebook, auto-remux to MP4.
 13. **Homepage Beautification** — personalize the homepage search box and other elements.
 14. **Version + Project URL + Auto Update Check** — version and project URL shown in module home and browser menu, with auto update checking.
 
@@ -101,75 +101,47 @@ Re-resolution happens on every browser start, so after a browser update the modu
 
 ### 已实现功能
 
-### 1. 下载桥接（第三方下载器接管）
-把三星浏览器的下载请求转交给第三方下载器（ADM / IDM+ / 1DM，包名可自定义）。
-- hook `TinDownloadController` 下载链路（`onDownloadStarted` 等）
-- 传递 Cookie / User-Agent / Referer 等登录态信息
-- 可选阻断原生下载（真正"接管"而非并行）
+### 1. 下载桥接
+下载请求转交第三方下载器（ADM / IDM+ / 1DM，包名可自定义），传递 Cookie / UA / Referer，可选阻断原生下载。
 
 ### 2. 设置集成 + 日志
-在三星浏览器设置页注入 SBPlus 子菜单，并提供内置日志查看。
+浏览器设置页注入 SBPlus 子菜单，内置日志查看。
 
-### 3. Via 风格网格菜单
-把三星「更多」菜单从单列纵向列表改造成多列网格（Via 风格），支持拖拽排序、
-添加/删除图标。
+### 3. 网格菜单
+「更多」菜单改多列网格，拖拽排序、添加/删除图标。
 
-### 4. 改区（Country ISO Code）
-通过 hook `CountryUtil.getCountryIsoCode()` 等入口，将浏览器地区切换到 17 国之一，
-影响所有区域相关行为。
+### 4. 改区
+切换浏览器地区到 17 国之一。
 
-### 5. 浏览器标识（UA 伪装）
-hook `SBrowserCommandLine.initialize()`，通过 `TerraceCommandLine.appendSwitchWithValue`
-注入 `user-agent` switch，完整替换 UA（桌面 Chrome / 手机 / iPhone / 自定义）。需重启浏览器生效。
+### 5. UA 伪装
+完整替换 User-Agent（桌面 / 手机 / iPhone / 自定义），需重启浏览器。
 
 ### 6. 精简设置页
-主开关 + 23 项多选屏蔽，两列网格展示，隐藏不需要的设置项。
+多选隐藏不需要的设置项。
 
-### 7. 屏蔽更新和小红点
-独立总开关，彻底屏蔽浏览器更新：
-- 清除更新通知 / 弹窗 / 红点（关于页、更多按钮、设置徽标）
-- 阻断更新检查链路（`UpdateManager.checkUpdate*`）
-- 阻断商店网络（`StubUtil.checkUpdateOnGalaxyStore` 等）
-- 禁止跳转商店 / 升档
-- 通过官方预留 `disable-update-dialog` switch 优雅屏蔽弹窗
+### 7. 屏蔽更新
+屏蔽浏览器更新通知 / 弹窗 / 红点，阻断更新检查和商店网络。
 
 ### 8. 主页视频背景
-让浏览器主页（新标签页/快速访问页）背景播放动态视频。
-- 通过 MediaStore 将选中视频存入公共 `Movies/SBPlus/` 目录
-- 用 `TextureView + MediaPlayer` 循环静音播放（TextureView 规避 SurfaceView 被不透明背景色盖住的问题）
-- 子页提供「选择视频 / 清除视频 / 删除视频」三个操作
+主页背景循环静音播放视频，支持选择/清除/删除。
 
-### 9. 油猴脚本管理（Userscript）
-完整的内置油猴脚本管理器：
-- 脚本列表 / 添加 / 保存 / 删除 / 开关（开关在前、名字在后）
-- 拦截 `.user.js` 下载引导安装
-- 支持源管理（`@updateURL` / `@downloadURL`）、「更新所有脚本」
-- 内置精简版 GM API（`GM_setValue` / `GM_getValue` / `GM_registerMenuCommand` 等）
-- 脚本详情页 + 分享导入
+### 9. 油猴脚本管理
+脚本列表 / 添加 / 删除 / 开关，拦截 `.user.js` 安装，源管理 + 批量更新，精简 GM API，分享导入。
 
 ### 10. 书签管理
-- 导入 / 导出书签（Chrome / Edge / Firefox 通用 HTML 格式）
-- 树形勾选对话框（可选导入/导出指定节点）
+导入 / 导出书签（Chrome / Edge / Firefox HTML 格式），树形勾选对话框。
 
-### 11. 随机浏览器标识（UA）
-内置 55 条真实 UA 池，支持随机轮换（桌面 Chrome / 手机 / iPhone / 自定义）。支持平台/浏览器多选和自定义参数动态生成。
+### 11. 随机 UA
+内置 55 条真实 UA 随机轮换，支持平台/浏览器多选和自定义参数。
 
 ### 12. 资源嗅探与下载引擎
-多线程下载引擎（m3u8/TVOD 流式），按类型分tab显示（视频/音频/图片独立全选）。
-- **B站 DASH 自动合并**：视频+音频流自动配对合并为单 MP4（4K/1080P+/HDR，大会员全清晰度）
-- **国内站点解析器**：抖音 / 快手 / 小红书 / 微博 / AcFun / 头条（script 标签 SSR JSON 提取）
-- **国外平台支持**：YouTube（itag 清晰度标注）、TikTok、X/Twitter、Instagram/Facebook
-- 分片视频（m4s/ts）自动纯 remux 转 MP4（秒级完成，不膨胀）
-- 任务进度条 / 速度显示 / 取消支持 / 并发数可配置
-- 下载后自动转 MP4 开关（默认开）
-- 图片格子选中显示蓝色遮罩
+多线程下载，按视频/音频/图片分 tab 显示。支持 B站 DASH 合并（4K/1080P+/HDR）、抖音/快手/小红书/微博/AcFun/头条、YouTube/TikTok/X/Instagram/Facebook，分片自动 remux 转 MP4。
 
-### 13. 主页美化子菜单
-主页搜索框等页面元素的个性化设置。
+### 13. 主页美化
+主页搜索框等元素个性化设置。
 
-### 14. 版本号 + 项目地址 + 自动检测更新
-- SBPlus 应用首页与浏览器 SBPlus 菜单里都显示版本号 + 项目地址
-- 启动/进入页面时自动检测 GitHub 最新 release，有新版本在版本号后提示「点击更新」，点击后确认下载 apk
+### 14. 自动更新
+显示版本号 + 项目地址，自动检测 GitHub 新版本并提示更新。
 
 ### 构建
 
