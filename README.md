@@ -166,7 +166,7 @@ gradle assembleDebug --no-daemon
 - Java 17（Temurin）
 - Gradle 8.7
 - Android SDK 34+
-- 依赖仓库：阿里云镜像（解决国内拉取 AGP 依赖超时问题）
+- 依赖仓库：国内镜像（解决拉取 AGP 依赖超时问题）
 - 测试设备：三星 Galaxy（Android 16 / SDK 36）
 
 ### 项目结构
