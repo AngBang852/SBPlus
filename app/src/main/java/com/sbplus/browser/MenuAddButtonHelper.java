@@ -15,7 +15,6 @@ import android.widget.TextView;
 
 import java.util.List;
 
-import de.robv.android.xposed.XposedBridge;
 
 /**
  * Injects a "+" button into the menu's bottom nav bar. Tapping it opens a dialog listing
@@ -54,9 +53,9 @@ public final class MenuAddButtonHelper {
             });
 
             bottomRow.addView(addBtn);
-            XposedBridge.log("[SBPlus] add button injected into bottom nav");
+            MainModule.logMsg("[SBPlus] add button injected into bottom nav");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] injectAddButton error: " + t);
+            MainModule.logMsg("[SBPlus] injectAddButton error: " + t);
         }
     }
 
@@ -120,15 +119,15 @@ public final class MenuAddButtonHelper {
                 anchor.getLocationInWindow(loc);
                 pop.showAtLocation(anchor, Gravity.TOP | Gravity.LEFT,
                         loc[0], loc[1] - panelHeight);
-                XposedBridge.log("[SBPlus] add popup above menu yRel=" + (loc[1] - panelHeight)
+                MainModule.logMsg("[SBPlus] add popup above menu yRel=" + (loc[1] - panelHeight)
                         + " menuTopRel=" + loc[1] + " panelH=" + panelHeight);
             } else {
                 pop.showAtLocation(panel, Gravity.BOTTOM, 0, 0);
-                XposedBridge.log("[SBPlus] add popup bottom (no anchor)");
+                MainModule.logMsg("[SBPlus] add popup bottom (no anchor)");
             }
-            XposedBridge.log("[SBPlus] add dialog shown (" + addable.size() + " addable)");
+            MainModule.logMsg("[SBPlus] add dialog shown (" + addable.size() + " addable)");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] showAddDialog error: " + t);
+            MainModule.logMsg("[SBPlus] showAddDialog error: " + t);
         }
     }
 
@@ -204,8 +203,8 @@ public final class MenuAddButtonHelper {
             cell.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     MenuReorderHelper.addItem(item);
-                    // Keep the panel open so the user can add several icons in one go.
-                    XposedBridge.log("[SBPlus] added " + item.getTitle() + " (panel stays open)");
+                    ((ViewGroup) v.getParent()).removeView(v);
+                    MainModule.logMsg("[SBPlus] added " + item.getTitle() + " (panel stays open)");
                 }
             });
             grid.addView(cell, gp);

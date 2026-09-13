@@ -398,10 +398,10 @@ public final class ThemeColorHelper {
     static int dp(Context ctx, float v) { return (int)(v * ctx.getResources().getDisplayMetrics().density + 0.5f); }
     static View spacer(Context ctx, int h) { View v = new View(ctx); v.setLayoutParams(new LinearLayout.LayoutParams(1, h)); return v; }
     static void toast(Context ctx, String msg) { try { android.widget.Toast.makeText(ctx, msg, 0).show(); } catch (Throwable ignored) {} }
-    static void log(String msg) { try { de.robv.android.xposed.XposedBridge.log("[SBPlus] themecolor " + msg); } catch (Throwable ignored) {} }
-    static Context getCtx(Object pref) { try { return (Context) de.robv.android.xposed.XposedHelpers.callMethod(pref, "getContext"); } catch (Throwable t) { return null; } }
+    static void log(String msg) { try { MainModule.logMsg("[SBPlus] themecolor " + msg); } catch (Throwable ignored) {} }
+    static Context getCtx(Object pref) { try { return (Context) MainHook.callMethod(pref, "getContext"); } catch (Throwable t) { return null; } }
     static void setProperty(Object obj, String method, Object arg) {
-        try { de.robv.android.xposed.XposedHelpers.callMethod(obj, method, arg); } catch (Throwable t) { log("call " + method + " err " + t); }
+        try { MainHook.callMethod(obj, method, arg); } catch (Throwable t) { log("call " + method + " err " + t); }
     }
 
     static Class<?> listenerParamType(Class<?> cls, String methodName) {

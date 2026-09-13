@@ -2,7 +2,7 @@
 <resources>
     <string name="app_name" translatable="false">SBPlus</string>
     <string name="version_label" translatable="false">版本 1.0</string>
-    <string name="module_desc" translatable="false">Samsung Browser Plus - download bridge and more</string>
+    <string name="module_desc" translatable="false">SBPlus - Samsung Internet enhancement module (LSPosed): download bridge, media sniffer, userscript manager, UA spoofing, region switch, homepage beautify and more. | 三星浏览器增强模块（LSPosed）：下载桥接、媒体嗅探、油猴脚本、UA伪装、改区、主页美化等。</string>
 
     <!-- target downloader default config -->
     <string name="pref_down_pkg" translatable="false">com.dv.adm</string>

@@ -6,9 +6,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
+import com.sbplus.browser.XC_MethodHook;
 
 /**
  * Show/hide (add/remove) icons in Samsung Internet's "More" (⋮) grid menu.
@@ -31,12 +29,12 @@ public final class MenuEditHelper {
 
     private static Object currentModel() {
         try {
-            Class<?> mgrCls = XposedHelpers.findClass(
+            Class<?> mgrCls = MainHook.loadClassSafely(
                     "com.sec.android.app.sbrowser.common.customize_toolbar.CustomizeToolbarManager", sCl);
-            Object mgr = XposedHelpers.callStaticMethod(mgrCls, "getInstance");
-            return XposedHelpers.callMethod(mgr, "getCurrentInstanceModel");
+            Object mgr = MainHook.callStaticMethod(mgrCls, "getInstance");
+            return MainHook.callMethod(mgr, "getCurrentInstanceModel");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] currentModel error: " + t);
+            MainModule.logMsg("[SBPlus] currentModel error: " + t);
             return null;
         }
     }
@@ -44,14 +42,14 @@ public final class MenuEditHelper {
     private static List<MenuItem> allMenus() {
         Object model = currentModel();
         if (model == null) return new ArrayList<>();
-        Object r = XposedHelpers.callMethod(model, "getAllMenus");
+        Object r = MainHook.callMethod(model, "getAllMenus");
         return r == null ? new ArrayList<MenuItem>() : (List<MenuItem>) r;
     }
 
     private static List<MenuItem> availableMenus() {
         Object model = currentModel();
         if (model == null) return new ArrayList<>();
-        Object r = XposedHelpers.callMethod(model, "getToolsAvailableMenus");
+        Object r = MainHook.callMethod(model, "getToolsAvailableMenus");
         return r == null ? new ArrayList<MenuItem>() : (List<MenuItem>) r;
     }
 
@@ -73,7 +71,7 @@ public final class MenuEditHelper {
             }
             return result;
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] getAddableMenus error: " + t);
+            MainModule.logMsg("[SBPlus] getAddableMenus error: " + t);
             return new ArrayList<>();
         }
     }
@@ -91,11 +89,11 @@ public final class MenuEditHelper {
         if (adapter == null) return;
         if (sAddItemHooked && sAddItemCl == cl) return;
         try {
-            final Class<?> adapterCls = XposedHelpers.findClass(
+            final Class<?> adapterCls = MainHook.loadClassSafely(
                     "com.sec.android.app.sbrowser.toolbar.MoreMenuRecyclerAdapter", cl);
 
             // getItemCount() -> icons + "+". No trailing blank fillers (paging disabled).
-            XposedHelpers.findAndHookMethod(adapterCls, "getItemCount",
+            MainHook.findAndHookMethod(adapterCls, "getItemCount",
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
                         int icons = (Integer) p.getResult();
@@ -109,13 +107,13 @@ public final class MenuEditHelper {
             // LayoutManager measures the item, so match_parent never resolves to the content
             // width (which breaks 5-columns-per-page alignment).
             try {
-                XposedHelpers.findAndHookMethod(adapterCls, "onCreateViewHolder",
-                        XposedHelpers.findClass("android.view.ViewGroup", cl), int.class,
+                MainHook.findAndHookMethod(adapterCls, "onCreateViewHolder",
+                        MainHook.loadClassSafely("android.view.ViewGroup", cl), int.class,
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
                             Object holder = p.getResult();
                             if (holder == null) return;
-                            android.view.View iv = (android.view.View) XposedHelpers.getObjectField(holder, "itemView");
+                            android.view.View iv = (android.view.View) MainHook.getObjectField(holder, "itemView");
                             if (iv == null) return;
                             try {
                                 int screenW = iv.getResources().getDisplayMetrics().widthPixels;
@@ -132,11 +130,11 @@ public final class MenuEditHelper {
                         }
                     });
             } catch (Throwable t) {
-                XposedBridge.log("[SBPlus] onCreateViewHolder width hook failed: " + t);
+                MainModule.logMsg("[SBPlus] onCreateViewHolder width hook failed: " + t);
             }
 
             // getItem(I) -> return null for the "+" cell and blank fillers (no backing MenuItem).
-            XposedHelpers.findAndHookMethod(adapterCls, "getItem", int.class,
+            MainHook.findAndHookMethod(adapterCls, "getItem", int.class,
                 new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
                         int pos = (Integer) p.args[0];
@@ -157,7 +155,7 @@ public final class MenuEditHelper {
                 }
             }
             if (vhCls == null) throw new ClassNotFoundException("ViewHolder for onBindViewHolder");
-            XposedHelpers.findAndHookMethod(adapterCls, "onBindViewHolder",
+            MainHook.findAndHookMethod(adapterCls, "onBindViewHolder",
                     vhCls,
                     int.class,
                 new XC_MethodHook() {
@@ -171,9 +169,9 @@ public final class MenuEditHelper {
                             // The "+" cell sits immediately after the last icon.
                             if (pos == icons) {
                                 android.widget.ImageView icon =
-                                        (android.widget.ImageView) XposedHelpers.getObjectField(holder, "mIcon");
+                                        (android.widget.ImageView) MainHook.getObjectField(holder, "mIcon");
                                 android.widget.TextView text =
-                                        (android.widget.TextView) XposedHelpers.getObjectField(holder, "mText");
+                                        (android.widget.TextView) MainHook.getObjectField(holder, "mText");
                                 if (icon != null) {
                                     icon.setVisibility(android.view.View.VISIBLE);
                                     icon.setImageResource(android.R.drawable.ic_input_add);
@@ -183,39 +181,39 @@ public final class MenuEditHelper {
                                     text.setVisibility(android.view.View.VISIBLE);
                                     text.setText("添加");
                                 }
-                                android.view.View badge = (android.view.View) XposedHelpers.getObjectField(holder, "mBadge");
+                                android.view.View badge = (android.view.View) MainHook.getObjectField(holder, "mBadge");
                                 if (badge != null) badge.setVisibility(android.view.View.GONE);
-                                android.view.View div = (android.view.View) XposedHelpers.getObjectField(holder, "mDivider");
+                                android.view.View div = (android.view.View) MainHook.getObjectField(holder, "mDivider");
                                 if (div != null) div.setVisibility(android.view.View.GONE);
-                                final android.view.View itemView = (android.view.View) XposedHelpers.getObjectField(holder, "itemView");
+                                final android.view.View itemView = (android.view.View) MainHook.getObjectField(holder, "itemView");
                                 if (itemView != null) {
                                     itemView.setClickable(true);
                                     itemView.setOnClickListener(new android.view.View.OnClickListener() {
                                         @Override public void onClick(android.view.View v) {
-                                            XposedBridge.log("[SBPlus] add cell CLICKED");
+                                            MainModule.logMsg("[SBPlus] add cell CLICKED");
                                             android.content.Context ctx = itemView.getContext();
                                             MenuAddButtonHelper.showAddDialog(ctx);
                                         }
                                     });
                                 }
-                                XposedBridge.log("[SBPlus] add cell rendered at pos " + pos
+                                MainModule.logMsg("[SBPlus] add cell rendered at pos " + pos
                                         + " (icons=" + icons + " pad=" + pad + ")");
                                 return;
                             }
 
                             // Blank filler cells AFTER the "+" (pad the tail to a full page).
                             if (icons >= 0 && pos > icons) {
-                                XposedBridge.log("[SBPlus] blank filler at pos " + pos
+                                MainModule.logMsg("[SBPlus] blank filler at pos " + pos
                                         + " (icons=" + icons + " pad=" + pad + ")");
                                 android.widget.ImageView icon =
-                                        (android.widget.ImageView) XposedHelpers.getObjectField(holder, "mIcon");
+                                        (android.widget.ImageView) MainHook.getObjectField(holder, "mIcon");
                                 android.widget.TextView text =
-                                        (android.widget.TextView) XposedHelpers.getObjectField(holder, "mText");
+                                        (android.widget.TextView) MainHook.getObjectField(holder, "mText");
                                 if (icon != null) icon.setVisibility(android.view.View.INVISIBLE);
                                 if (text != null) text.setVisibility(android.view.View.INVISIBLE);
-                                android.view.View badge = (android.view.View) XposedHelpers.getObjectField(holder, "mBadge");
+                                android.view.View badge = (android.view.View) MainHook.getObjectField(holder, "mBadge");
                                 if (badge != null) badge.setVisibility(android.view.View.GONE);
-                                android.view.View div = (android.view.View) XposedHelpers.getObjectField(holder, "mDivider");
+                                android.view.View div = (android.view.View) MainHook.getObjectField(holder, "mDivider");
                                 if (div != null) div.setVisibility(android.view.View.GONE);
                                 return;
                             }
@@ -223,25 +221,25 @@ public final class MenuEditHelper {
                             // Real icon cell: restore icons hidden by a recycled blank-filler
                             // holder, then paint the ✕ mark in edit mode.
                             android.widget.ImageView ric =
-                                    (android.widget.ImageView) XposedHelpers.getObjectField(holder, "mIcon");
+                                    (android.widget.ImageView) MainHook.getObjectField(holder, "mIcon");
                             android.widget.TextView rtx =
-                                    (android.widget.TextView) XposedHelpers.getObjectField(holder, "mText");
+                                    (android.widget.TextView) MainHook.getObjectField(holder, "mText");
                             if (ric != null) ric.setVisibility(android.view.View.VISIBLE);
                             if (rtx != null) rtx.setVisibility(android.view.View.VISIBLE);
-                            android.view.View rbd = (android.view.View) XposedHelpers.getObjectField(holder, "mBadge");
+                            android.view.View rbd = (android.view.View) MainHook.getObjectField(holder, "mBadge");
                             if (rbd != null) rbd.setVisibility(android.view.View.VISIBLE);
                             MenuReorderHelper.decorateBoundItem(holder, pos);
                         } catch (Throwable t) {
-                            XposedBridge.log("[SBPlus] add cell bind error: " + t);
+                            MainModule.logMsg("[SBPlus] add cell bind error: " + t);
                         }
                     }
                 });
 
             sAddItemHooked = true;
             sAddItemCl = cl;
-            XposedBridge.log("[SBPlus] grid add-item hooks installed");
+            MainModule.logMsg("[SBPlus] grid add-item hooks installed");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] installGridAddItem error: " + t);
+            MainModule.logMsg("[SBPlus] installGridAddItem error: " + t);
         }
     }
 }

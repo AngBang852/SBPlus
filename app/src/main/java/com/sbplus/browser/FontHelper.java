@@ -362,7 +362,7 @@ public final class FontHelper {
 
     // ============ 反射工具 ============
     private static void setProperty(Object pref, String method, Object value) {
-        try { de.robv.android.xposed.XposedHelpers.callMethod(pref, method, value); } catch (Throwable ignored) {}
+        try { MainHook.callMethod(pref, method, value); } catch (Throwable ignored) {}
     }
     private static Class<?> listenerParamType(Class<?> cls, String methodName) {
         try {
@@ -414,7 +414,7 @@ public final class FontHelper {
     }
 
     private static void XposedBridgeLog(String m) {
-        try { de.robv.android.xposed.XposedBridge.log("[SBPlus] " + m); } catch (Throwable ignored) {}
+        try { MainModule.logMsg("[SBPlus] " + m); } catch (Throwable ignored) {}
     }
     private static void toast(Context ctx, String msg) {
         try { android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) {}

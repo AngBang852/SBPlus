@@ -17,8 +17,6 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Long-press-to-reorder + show/hide for Samsung Internet's "More" (⋮) grid menu.
@@ -54,6 +52,7 @@ public final class MenuReorderHelper {
     private static volatile float sDownX, sDownY;
     private static volatile int sDragPos = -1;
     private static volatile int sDragFrom = -1;
+    private static volatile float sDragStartX = 0f, sDragStartY = 0f;
     private static volatile View sDragView = null;
 
     private static final int EDGE_SCROLL_MAX = 70;        // max scroll px per frame (fastest)
@@ -92,7 +91,7 @@ public final class MenuReorderHelper {
             Object recycler = sRecycler;
             Class<?> m0 = null;
             try {
-                Class<?> rvCls = XposedHelpers.findClass("androidx.recyclerview.widget.RecyclerView", sCl);
+                Class<?> rvCls = MainHook.loadClassSafely("androidx.recyclerview.widget.RecyclerView", sCl);
                 for (java.lang.reflect.Method m : rvCls.getMethods()) {
                     if ("addOnItemTouchListener".equals(m.getName()) && m.getParameterTypes().length == 1) {
                         m0 = m.getParameterTypes()[0];
@@ -101,7 +100,7 @@ public final class MenuReorderHelper {
                 }
             } catch (Throwable ignored) {}
             if (m0 == null || !m0.isInterface()) {
-                XposedBridge.log("[SBPlus] M0 not an interface, reorder disabled");
+                MainModule.logMsg("[SBPlus] M0 not an interface, reorder disabled");
                 return;
             }
             java.lang.reflect.InvocationHandler h = new java.lang.reflect.InvocationHandler() {
@@ -122,11 +121,11 @@ public final class MenuReorderHelper {
                 }
             };
             sTouchProxy = Proxy.newProxyInstance(sCl, new Class<?>[]{m0}, h);
-            XposedHelpers.callMethod(recycler, "addOnItemTouchListener", sTouchProxy);
+            MainHook.callMethod(recycler, "addOnItemTouchListener", sTouchProxy);
             sProxiedRecycler = recycler;
-            XposedBridge.log("[SBPlus] reorder touch proxy installed on " + recycler);
+            MainModule.logMsg("[SBPlus] reorder touch proxy installed on " + recycler);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] installTouchProxy error: " + t);
+            MainModule.logMsg("[SBPlus] installTouchProxy error: " + t);
         }
     }
 
@@ -152,7 +151,7 @@ public final class MenuReorderHelper {
                 // Tap on the trailing "+" add cell -> open the add dialog.
                 int addPos = (sItems != null) ? sItems.size() : -1;
                 if (addPos >= 0 && isTapOnPosition(rx, ry, addPos)) {
-                    XposedBridge.log("[SBPlus] add cell tapped -> show add dialog");
+                    MainModule.logMsg("[SBPlus] add cell tapped -> show add dialog");
                     MenuAddButtonHelper.showAddDialog(((View) sRecycler).getContext());
                     return false;
                 }
@@ -160,7 +159,7 @@ public final class MenuReorderHelper {
                 // and route to our own ✕ / empty-space handling.
                 if (sEditMode) {
                     int underRaw = positionUnderRaw(rx, ry);
-                    XposedBridge.log("[SBPlus] UP in edit: underRaw=" + underRaw
+                    MainModule.logMsg("[SBPlus] UP in edit: underRaw=" + underRaw
                             + " hasMark=" + (hitRemoveMark(rx, ry) != null));
                     View mark = hitRemoveMark(rx, ry);
                     if (mark != null) {
@@ -171,7 +170,7 @@ public final class MenuReorderHelper {
                             showDeleteMarks();
                         }
                     } else if (underRaw < 0) {
-                        XposedBridge.log("[SBPlus] tap empty -> exit edit mode");
+                        MainModule.logMsg("[SBPlus] tap empty -> exit edit mode");
                         exitEditModeAndSave();
                     }
                     return true; // swallow the tap so the item's original onClick never fires
@@ -185,14 +184,16 @@ public final class MenuReorderHelper {
         if (sDownTime != 0 && android.os.SystemClock.uptimeMillis() - sDownTime > 500L
                 && dx * dx + dy * dy < 2500f) {
             int under = positionUnder(ev);
-            XposedBridge.log("[SBPlus] long-press candidate, under=" + under + " edit=" + sEditMode);
+            MainModule.logMsg("[SBPlus] long-press candidate, under=" + under + " edit=" + sEditMode);
             if (under >= 0 && !isAddCell(under)) {
                 // Long-press on a real icon -> enter edit mode and begin dragging this icon.
                 enterEditMode();
                 sDragging = true;
                 sDragPos = under;
                 sDragFrom = under;
-                XposedBridge.log("[SBPlus] long-press -> drag from " + sDragPos);
+                sDragStartX = ev.getRawX();
+                sDragStartY = ev.getRawY();
+                MainModule.logMsg("[SBPlus] long-press -> drag from " + sDragPos);
                 if (sRecycler instanceof View) {
                     ((View) sRecycler).performHapticFeedback(
                             android.view.HapticFeedbackConstants.LONG_PRESS);
@@ -210,7 +211,7 @@ public final class MenuReorderHelper {
                 handleTouch(ev);
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] reorder onTouch error: " + t);
+            MainModule.logMsg("[SBPlus] reorder onTouch error: " + t);
         }
     }
 
@@ -221,8 +222,12 @@ public final class MenuReorderHelper {
             case MotionEvent.ACTION_MOVE: {
                 sLastMoveRawX = ev.getRawX();
                 sLastMoveRawY = ev.getRawY();
-                int to = positionUnder(ev);
-                if (to >= 0) sDragPos = to;
+                float mdx = ev.getRawX() - sDragStartX;
+                float mdy = ev.getRawY() - sDragStartY;
+                if (mdx * mdx + mdy * mdy > 1600f) {
+                    int to = positionUnder(ev);
+                    if (to >= 0) sDragPos = to;
+                }
                 updateDragVisual(ev);
                 handleEdgeScroll(ev);
                 break;
@@ -240,7 +245,7 @@ public final class MenuReorderHelper {
                     // menu (e.g. taps outside the sheet) without going through exitEditModeAndSave.
                     persistOrderNow();
                     // Stay in edit mode so the user can tap ✕ to remove, or tap empty to exit.
-                    XposedBridge.log("[SBPlus] drag finished, order persisted, still in edit mode");
+                    MainModule.logMsg("[SBPlus] drag finished, order persisted, still in edit mode");
                 }
                 break;
         }
@@ -253,7 +258,7 @@ public final class MenuReorderHelper {
         if (sCachedSecondary != null) flat.addAll(sCachedSecondary);
         sItems = flat;
         sEditMode = true;
-        XposedBridge.log("[SBPlus] enter edit mode, items=" + flat.size());
+        MainModule.logMsg("[SBPlus] enter edit mode, items=" + flat.size());
         // Paint the ✕ marks after layout settles so icon coordinates are correct.
         if (sRecycler instanceof View) {
             final View rv = (View) sRecycler;
@@ -280,14 +285,14 @@ public final class MenuReorderHelper {
     private static void disableIconsForEdit() {
         try {
             if (!(sRecycler instanceof View)) return;
-            int childCount = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             for (int i = 0; i < childCount; i++) {
-                View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
+                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                 if (child == null) continue;
                 disableClickTree(child);
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] disableIconsForEdit error: " + t);
+            MainModule.logMsg("[SBPlus] disableIconsForEdit error: " + t);
         }
     }
 
@@ -308,14 +313,14 @@ public final class MenuReorderHelper {
     private static void enableIconsAfterEdit() {
         try {
             if (!(sRecycler instanceof View)) return;
-            int childCount = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             for (int i = 0; i < childCount; i++) {
-                View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
+                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                 if (child == null) continue;
                 restoreClickTree(child);
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] enableIconsAfterEdit error: " + t);
+            MainModule.logMsg("[SBPlus] enableIconsAfterEdit error: " + t);
         }
     }
 
@@ -342,11 +347,11 @@ public final class MenuReorderHelper {
     private static boolean isTapOnPosition(float rawX, float rawY, int pos) {
         try {
             if (!(sRecycler instanceof View)) return false;
-            int childCount = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             for (int i = 0; i < childCount; i++) {
-                View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
+                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                 if (child == null) continue;
-                int lp = ((Number) XposedHelpers.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
+                int lp = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
                 if (lp != pos) continue;
                 int[] loc = new int[2];
                 child.getLocationOnScreen(loc);
@@ -354,7 +359,7 @@ public final class MenuReorderHelper {
                         && rawY >= loc[1] && rawY <= loc[1] + child.getHeight();
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] isTapOnPosition error: " + t);
+            MainModule.logMsg("[SBPlus] isTapOnPosition error: " + t);
         }
         return false;
     }
@@ -365,7 +370,7 @@ public final class MenuReorderHelper {
         enableIconsAfterEdit();
         sEditMode = false;
         saveOrder();
-        XposedBridge.log("[SBPlus] exit edit mode, order saved");
+        MainModule.logMsg("[SBPlus] exit edit mode, order saved");
     }
 
     /** Map a raw screen coordinate to a flat adapter position (5 cols x 2 rows paging grid). */
@@ -381,9 +386,9 @@ public final class MenuReorderHelper {
             View rv = (View) sRecycler;
             int total = sItems.size();
             // Preferred: hit-test the actual visible children and read their layout position.
-            int childCount = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             for (int i = 0; i < childCount; i++) {
-                View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
+                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                 if (child == null) continue;
                 // Skip the item currently being dragged: its translation follows the finger,
                 // so it would always hit-test as its original (from) slot and mask the target.
@@ -394,17 +399,17 @@ public final class MenuReorderHelper {
                 float cy = rawY;
                 if (cx >= loc[0] && cx <= loc[0] + child.getWidth()
                         && cy >= loc[1] && cy <= loc[1] + child.getHeight()) {
-                    int pos = ((Number) XposedHelpers.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
+                    int pos = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
                     if (pos >= 0 && pos < total) return pos;
                 }
             }
-            // Fallback: geometric estimate.
+            // Fallback: geometric estimate — only if finger is within the grid bounds.
             int cols = 5, rows = 2;
             int pageW = rv.getWidth();
             if (pageW <= 0) return -1;
             int itemW = pageW / cols;
             int itemH = 0;
-            View child0 = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", 0);
+            View child0 = (View) MainHook.callMethod(sRecycler, "getChildAt", 0);
             if (child0 != null) itemH = child0.getHeight();
             if (itemH <= 0) itemH = (int) (76f * rv.getResources().getDisplayMetrics().density);
             int[] gloc = new int[2];
@@ -413,7 +418,7 @@ public final class MenuReorderHelper {
             float relY = rawY - gloc[1];
             int scrollX = 0;
             try {
-                scrollX = ((Number) XposedHelpers.callMethod(sRecycler, "computeHorizontalScrollOffset")).intValue();
+                scrollX = ((Number) MainHook.callMethod(sRecycler, "computeHorizontalScrollOffset")).intValue();
             } catch (Throwable ignored) {}
             int page = (scrollX + (int) relX) / pageW;
             int withinPage = (scrollX + (int) relX) % pageW;
@@ -422,12 +427,19 @@ public final class MenuReorderHelper {
             // Taps above the grid (relY<0) or below it (row>=rows) are empty space, not an item.
             // Return -1 so callers can treat it as "tap outside -> exit edit mode".
             if (relY < 0f || row >= rows) return -1;
-            if (col < 0) col = 0; else if (col >= cols) col = cols - 1;
+            // If finger is between icons (gap area), don't snap to a neighbor — return -1.
+            int colEnd = (col + 1) * itemW;
+            int colStart = col * itemW;
+            int rowStart = row * itemH;
+            int rowEnd = (row + 1) * itemH;
+            if (withinPage < colStart || withinPage > colEnd
+                    || (int) relY < rowStart || (int) relY > rowEnd) return -1;
+            if (col < 0 || col >= cols) return -1;
             int pos = page * (cols * rows) + row * cols + col;
-            if (pos < 0) pos = 0; else if (pos >= total) pos = total - 1;
+            if (pos < 0 || pos >= total) return -1;
             return pos;
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] positionUnder error: " + t);
+            MainModule.logMsg("[SBPlus] positionUnder error: " + t);
             return -1;
         }
     }
@@ -442,24 +454,24 @@ public final class MenuReorderHelper {
             MenuItem b = sItems.get(to);
             sItems.set(from, b);
             sItems.set(to, a);
-            XposedBridge.log("[SBPlus] applyMove (swap) " + from + " <-> " + to);
+            MainModule.logMsg("[SBPlus] applyMove (swap) " + from + " <-> " + to);
             // Push the swapped order into the handler's live list (the adapter's real source)
             // BEFORE repainting, otherwise notifyItemChanged shows stale data.
             syncHandlerLists();
-            XposedHelpers.callMethod(sAdapter, "notifyItemChanged", from);
-            XposedHelpers.callMethod(sAdapter, "notifyItemChanged", to);
+            MainHook.callMethod(sAdapter, "notifyItemChanged", from);
+            MainHook.callMethod(sAdapter, "notifyItemChanged", to);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] applyMove error: " + t);
+            MainModule.logMsg("[SBPlus] applyMove error: " + t);
         }
     }
 
     /** Find the item view for a layout position without disturbing the RecyclerView. */
     private static View findItemView(int pos) {
         try {
-            int childCount = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             for (int i = 0; i < childCount; i++) {
-                View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
-                int lp = ((Number) XposedHelpers.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
+                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
+                int lp = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
                 if (lp == pos) return child;
             }
         } catch (Throwable ignored) {}
@@ -481,7 +493,7 @@ public final class MenuReorderHelper {
             sDragView.animate().scaleX(1.08f).scaleY(1.08f).setDuration(120).start();
             updateDragVisual(ev);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] startDragVisual error: " + t);
+            MainModule.logMsg("[SBPlus] startDragVisual error: " + t);
         }
     }
 
@@ -500,7 +512,7 @@ public final class MenuReorderHelper {
             sDragView.setTranslationX(dx);
             sDragView.setTranslationY(dy);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] updateDragVisual error: " + t);
+            MainModule.logMsg("[SBPlus] updateDragVisual error: " + t);
         }
     }
 
@@ -513,7 +525,7 @@ public final class MenuReorderHelper {
             sDragView.setTranslationY(0f);
             sDragView.setElevation(0f);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] endDragVisual error: " + t);
+            MainModule.logMsg("[SBPlus] endDragVisual error: " + t);
         }
         sDragView = null;
     }
@@ -547,7 +559,7 @@ public final class MenuReorderHelper {
                         if (!sDragging || sDragView == null) { stopEdgeScroll(); return; }
                         if (sScrollTicker[0] != this) { return; } // superseded by a newer ticker
                         int step = (int) (EDGE_SCROLL_MIN + (EDGE_SCROLL_MAX - EDGE_SCROLL_MIN) * d);
-                        XposedHelpers.callMethod(sRecycler, "scrollBy", direction * step, 0);
+                        MainHook.callMethod(sRecycler, "scrollBy", direction * step, 0);
                         if (sLastMoveRawX != null && sLastMoveRawY != null) {
                             int p = positionUnderRaw(sLastMoveRawX, sLastMoveRawY);
                             if (p >= 0) sDragPos = p;
@@ -562,7 +574,7 @@ public final class MenuReorderHelper {
             sScrollTicker[0] = ticker;
             rv.postOnAnimation(ticker);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] handleEdgeScroll error: " + t);
+            MainModule.logMsg("[SBPlus] handleEdgeScroll error: " + t);
         }
     }
 
@@ -577,11 +589,11 @@ public final class MenuReorderHelper {
             // so the reorder is visible immediately (not only after closing/reopening).
             syncHandlerLists();
             if (sAdapter != null) {
-                XposedHelpers.callMethod(sAdapter, "notifyDataSetChanged");
+                MainHook.callMethod(sAdapter, "notifyDataSetChanged");
             }
-            XposedBridge.log("[SBPlus] saveOrder done (" + sItems.size() + " items)");
+            MainModule.logMsg("[SBPlus] saveOrder done (" + sItems.size() + " items)");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] saveOrder error: " + t);
+            MainModule.logMsg("[SBPlus] saveOrder error: " + t);
         }
     }
 
@@ -596,15 +608,15 @@ public final class MenuReorderHelper {
             for (MenuItem it : sItems) {
                 if (it != null) orderLog.append(String.valueOf(it.getTitle())).append("|");
             }
-            XposedBridge.log("[SBPlus] " + orderLog);
-            Class<?> mgrCls = XposedHelpers.findClass(
+            MainModule.logMsg("[SBPlus] " + orderLog);
+            Class<?> mgrCls = MainHook.loadClassSafely(
                     "com.sec.android.app.sbrowser.common.customize_toolbar.CustomizeToolbarManager", sCl);
-            Object mgr = XposedHelpers.callStaticMethod(mgrCls, "getInstance");
-            XposedHelpers.callMethod(mgr, "saveToolsMenu", sItems);
+            Object mgr = MainHook.callStaticMethod(mgrCls, "getInstance");
+            MainHook.callMethod(mgr, "saveToolsMenu", sItems);
             syncHandlerLists();
-            XposedBridge.log("[SBPlus] saveToolsMenu persisted (" + sItems.size() + " items)");
+            MainModule.logMsg("[SBPlus] saveToolsMenu persisted (" + sItems.size() + " items)");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] persistOrderNow error: " + t);
+            MainModule.logMsg("[SBPlus] persistOrderNow error: " + t);
         }
     }
 
@@ -623,7 +635,7 @@ public final class MenuReorderHelper {
                 sCachedSecondary.clear();
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] syncHandlerLists error: " + t);
+            MainModule.logMsg("[SBPlus] syncHandlerLists error: " + t);
         }
     }
 
@@ -651,7 +663,7 @@ public final class MenuReorderHelper {
                 return new int[]{ loc[0], loc[1], loc[0] + rv.getWidth(), loc[1] + rv.getHeight() };
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] menuBoundsOnScreen error: " + t);
+            MainModule.logMsg("[SBPlus] menuBoundsOnScreen error: " + t);
         }
         return null;
     }
@@ -670,7 +682,7 @@ public final class MenuReorderHelper {
             saveOrder();
             com.sbplus.browser.MainHook.refreshIndicatorIfNeeded();
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] addItem error: " + t);
+            MainModule.logMsg("[SBPlus] addItem error: " + t);
         }
     }
 
@@ -684,7 +696,7 @@ public final class MenuReorderHelper {
             saveAfterRemove();
             com.sbplus.browser.MainHook.refreshIndicatorIfNeeded();
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] removeItem error: " + t);
+            MainModule.logMsg("[SBPlus] removeItem error: " + t);
         }
     }
 
@@ -697,17 +709,17 @@ public final class MenuReorderHelper {
             for (MenuItem it : sItems) {
                 if (it != null) it.setChecked(true);
             }
-            Class<?> mgrCls = XposedHelpers.findClass(
+            Class<?> mgrCls = MainHook.loadClassSafely(
                     "com.sec.android.app.sbrowser.common.customize_toolbar.CustomizeToolbarManager", sCl);
-            Object mgr = XposedHelpers.callStaticMethod(mgrCls, "getInstance");
-            XposedHelpers.callMethod(mgr, "saveToolsMenu", sItems);
+            Object mgr = MainHook.callStaticMethod(mgrCls, "getInstance");
+            MainHook.callMethod(mgr, "saveToolsMenu", sItems);
             syncHandlerLists();
             if (sAdapter != null) {
-                XposedHelpers.callMethod(sAdapter, "notifyDataSetChanged");
+                MainHook.callMethod(sAdapter, "notifyDataSetChanged");
             }
-            XposedBridge.log("[SBPlus] removed item, saved " + sItems.size() + " remaining");
+            MainModule.logMsg("[SBPlus] removed item, saved " + sItems.size() + " remaining");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] saveAfterRemove error: " + t);
+            MainModule.logMsg("[SBPlus] saveAfterRemove error: " + t);
         }
     }
 
@@ -728,11 +740,11 @@ public final class MenuReorderHelper {
                 ((ViewGroup) rv).setClipChildren(false);
                 ((ViewGroup) rv).setClipToPadding(false);
             }
-            int childCount = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             for (int i = 0; i < childCount; i++) {
-                View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
+                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                 if (child == null || !(child instanceof ViewGroup)) continue;
-                int pos = ((Number) XposedHelpers.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
+                int pos = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
                 if (pos < 0 || sItems == null || pos >= sItems.size()) continue;
                 // Block the original click while editing (and remember its clickable state).
                 child.setTag(0x7f0f0001, Boolean.valueOf(child.isClickable()));
@@ -745,9 +757,9 @@ public final class MenuReorderHelper {
                 child.setTag(0x7f0f0002, pos);
                 addDeleteMark((ViewGroup) child, pos);
             }
-            XposedBridge.log("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items");
+            MainModule.logMsg("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items");
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] showDeleteMarks error: " + t);
+            MainModule.logMsg("[SBPlus] showDeleteMarks error: " + t);
         }
     }
 
@@ -761,9 +773,9 @@ public final class MenuReorderHelper {
             // Belt-and-suspenders: scan every current child and remove any lingering ✕
             // (covers marks whose parent changed after a page-scroll/recycle).
             if (sRecycler instanceof View) {
-                int n = ((Number) XposedHelpers.callMethod(sRecycler, "getChildCount")).intValue();
+                int n = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
                 for (int i = 0; i < n; i++) {
-                    View child = (View) XposedHelpers.callMethod(sRecycler, "getChildAt", i);
+                    View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                     if (child instanceof ViewGroup) {
                         ViewGroup vg = (ViewGroup) child;
                         for (int j = vg.getChildCount() - 1; j >= 0; j--) {
@@ -777,7 +789,7 @@ public final class MenuReorderHelper {
                 }
             }
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] hideDeleteMarks error: " + t);
+            MainModule.logMsg("[SBPlus] hideDeleteMarks error: " + t);
         }
     }
 
@@ -787,7 +799,7 @@ public final class MenuReorderHelper {
      */
     public static void decorateBoundItem(Object holder, int pos) {
         try {
-            View child = (View) XposedHelpers.getObjectField(holder, "itemView");
+            View child = (View) MainHook.getObjectField(holder, "itemView");
             if (child == null || !(child instanceof ViewGroup)) return;
             ViewGroup vg = (ViewGroup) child;
             // Always strip any lingering ✕ on a (re)bound item, regardless of edit mode —
@@ -808,7 +820,7 @@ public final class MenuReorderHelper {
             child.setTag(0x7f0f0002, pos);
             addDeleteMark((ViewGroup) child, pos);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] decorateBoundItem error: " + t);
+            MainModule.logMsg("[SBPlus] decorateBoundItem error: " + t);
         }
     }
 
@@ -858,10 +870,10 @@ public final class MenuReorderHelper {
                     float y = Math.max(0f, iconTop);
                     mark.setX(x);
                     mark.setY(y);
-                    XposedBridge.log("[SBPlus] mark pinned iconLeft=" + iconLeft
+                    MainModule.logMsg("[SBPlus] mark pinned iconLeft=" + iconLeft
                             + " iconTop=" + iconTop + " x=" + x + " y=" + y);
                 } catch (Throwable t) {
-                    XposedBridge.log("[SBPlus] mark pin error: " + t);
+                    MainModule.logMsg("[SBPlus] mark pin error: " + t);
                 }
             }
         };
@@ -878,7 +890,7 @@ public final class MenuReorderHelper {
             });
             sRemoveMarks.put(child, mark);
         } catch (Throwable t) {
-            XposedBridge.log("[SBPlus] addDeleteMark error: " + t);
+            MainModule.logMsg("[SBPlus] addDeleteMark error: " + t);
         }
     }
 
