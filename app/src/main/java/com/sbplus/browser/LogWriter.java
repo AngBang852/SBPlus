@@ -28,13 +28,13 @@ public final class LogWriter {
     public static void init(Context ctx) {
         if (ctx == null) return;
         sContext = ctx;
-        de.robv.android.xposed.XposedBridge.log("[SBPlus] LogWriter ready (provider-backed)");
+        MainModule.logMsg("[SBPlus] LogWriter ready (provider-backed)");
     }
 
     /** Log a message to logcat and forward it to the module app's log store. */
     public static void log(String tag, String msg) {
         String line = "[" + tag + "] " + msg;
-        de.robv.android.xposed.XposedBridge.log("[SBPlus] " + line);
+        MainModule.logMsg("[SBPlus] " + line);
 
         Context ctx = sContext;
         if (ctx == null) return; // context not ready yet → logcat only

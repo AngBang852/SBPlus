@@ -43,8 +43,10 @@ android {
 }
 
 dependencies {
-    // Xposed API（compileOnly，运行时由 LSPosed/framework 提供）
-    compileOnly 'de.robv.android.xposed:api:82'
+    // LSPosed 新 API（compileOnly，运行时由 LSPosed 框架提供）
+    compileOnly files('libs/libxposed-api-102.jar')
+
+    // 旧 Xposed API 已移除，XC_MethodHook/MethodHookParam 使用自实现（非 stub）
 
     // androidx.fragment（compileOnly：运行时由目标应用三星浏览器提供，
     // 编译期仅需能解析 android x.fragment.app.Fragment 基类）

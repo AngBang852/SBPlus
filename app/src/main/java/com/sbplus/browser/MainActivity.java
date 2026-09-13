@@ -8,7 +8,7 @@ import android.os.Bundle;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
-import de.robv.android.xposed.XSharedPreferences;
+
 
 /**
  * SBPlus module entry / status screen.
@@ -37,9 +37,7 @@ public class MainActivity extends Activity {
                 .putInt(KEY_VERSION_CODE, BuildConfig.VERSION_CODE)
                 .apply();
         try {
-            XSharedPreferences xp = new XSharedPreferences(getPackageName(), PREFS_NAME);
-            xp.makeWorldReadable();
-            xp.reload();
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().commit();
         } catch (Throwable ignored) {}
 
         mVersionView = findViewById(R.id.tv_version);

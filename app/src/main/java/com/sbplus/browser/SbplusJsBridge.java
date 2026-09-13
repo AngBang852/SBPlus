@@ -10,7 +10,32 @@ public class SbplusJsBridge {
 
     @JavascriptInterface
     public void gmLog(String msg) {
-        de.robv.android.xposed.XposedBridge.log("[SBPlus][JS] " + msg);
+        MainModule.logMsg("[SBPlus][JS] " + msg);
+    }
+
+    @JavascriptInterface
+    public void gmError(String scriptName, String errorType, String message, String source, int line) {
+        MainHook.logScriptError(scriptName, errorType, message, source, line);
+    }
+
+    @JavascriptInterface
+    public void gmSetValue(String tag, String key, String value) {
+        MainHook.gmSetValue(tag, key, value);
+    }
+
+    @JavascriptInterface
+    public String gmGetValue(String tag, String key) {
+        return MainHook.gmGetValue(tag, key);
+    }
+
+    @JavascriptInterface
+    public void gmDeleteValue(String tag, String key) {
+        MainHook.gmDeleteValue(tag, key);
+    }
+
+    @JavascriptInterface
+    public String gmListValues(String tag) {
+        return MainHook.gmListValues(tag);
     }
 
     /**
@@ -22,7 +47,7 @@ public class SbplusJsBridge {
         try {
             MainHook.onSniffedMedia(jsons);
         } catch (Throwable t) {
-            de.robv.android.xposed.XposedBridge.log("[SBPlus] reportMedia error: " + t);
+            MainModule.logMsg("[SBPlus] reportMedia error: " + t);
         }
     }
 
@@ -68,7 +93,7 @@ public class SbplusJsBridge {
             java.io.InputStream is = (status >= 200 && status < 400)
                     ? conn.getInputStream() : conn.getErrorStream();
             String responseText = readStream(is);
-            de.robv.android.xposed.XposedBridge.log("[SBPlus] gmXhr " + method + " " + url + " -> status=" + status + " len=" + (responseText == null ? 0 : responseText.length()));
+            MainModule.logMsg("[SBPlus] gmXhr " + method + " " + url + " -> status=" + status + " len=" + (responseText == null ? 0 : responseText.length()));
 
             org.json.JSONObject result = new org.json.JSONObject();
             result.put("status", status);
@@ -76,7 +101,7 @@ public class SbplusJsBridge {
             result.put("error", "");
             return result.toString();
         } catch (Throwable t) {
-            de.robv.android.xposed.XposedBridge.log("[SBPlus] gmXhr ERROR " + method + " " + url + " -> " + t);
+            MainModule.logMsg("[SBPlus] gmXhr ERROR " + method + " " + url + " -> " + t);
             try {
                 org.json.JSONObject result = new org.json.JSONObject();
                 result.put("status", -1);

@@ -144,7 +144,7 @@ public final class CookieHelper {
     }
 
     private static void XposedBridgeLog(String m) {
-        try { de.robv.android.xposed.XposedBridge.log("[SBPlus] CookieHelper " + m); }
+        try { MainModule.logMsg("[SBPlus] CookieHelper " + m); }
         catch (Throwable ignored) {}
     }
 }
