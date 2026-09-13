@@ -13,9 +13,9 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 
 ### Features
 
-1. **Download Bridge** — forward downloads to a third-party manager (ADM / IDM+ / 1DM, customizable package), passing Cookie / UA / Referer; optionally block the native download.
+1. **Download Bridge** — forward downloads to a third-party manager (customizable package), passing Cookie / UA / Referer; optionally block the native download.
 2. **Settings Integration + Logging** — inject an SBPlus submenu into browser settings, with a built-in log viewer.
-3. **Via-style Grid Menu** — turn the "More" menu into a multi-column grid, drag-to-reorder, add/remove icons.
+3. **Grid Menu** — turn the "More" menu into a multi-column grid, drag-to-reorder, add/remove icons.
 4. **Region Switch** — switch the browser region to one of 17 countries.
 5. **UA Spoofing** — fully replace the User-Agent (Desktop Chrome / Mobile / iPhone / custom).
 6. **Streamlined Settings** — master switch + multi-select hiding for unneeded items.
