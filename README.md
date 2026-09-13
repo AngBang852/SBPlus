@@ -53,6 +53,22 @@ gradle assembleDebug --no-daemon
 
 Output: `app\build\outputs\apk\debug\app-debug.apk`
 
+Release signing passwords are passed via project properties (not committed):
+
+```bat
+gradle assembleRelease -PSBPLUS_STORE_PASSWORD=sbplus123 -PSBPLUS_KEY_PASSWORD=sbplus123 -PSBPLUS_KEY_ALIAS=sbplus
+```
+
+### Code Quality
+
+v2.5.3 underwent a full code audit, fixing **5 Critical + 16 High** issues:
+
+- **Resource leaks**: try-finally on all file/zip/HTTP streams; MediaPlayer tracked via TextureView tag + `releaseVideoPlayerOf` helper.
+- **Thread safety**: `ConcurrentHashMap` / `CopyOnWriteArrayList` / `synchronizedMap` / `AtomicBoolean` / `volatile` applied to shared collections and flags.
+- **NPE guards**: null checks on `UserscriptMeta.parse()`, UA helpers, `parseAsc` bounds check.
+- **Icon tint fix**: `ensureIconTint` size check + colorFilter cleanup; `computeIsBrowserUiIcon` excludes adblock/tracker/plugin pages — fixes ad blocker background discoloration.
+- **Performance**: streaming video copy, precompiled regex, deduplicated debug hook, JS string escaping.
+
 ### Self-adaptation
 
 The module resolves Samsung's obfuscated / version-dependent class and method names **at runtime**, instead of hardcoding them:
@@ -70,7 +86,7 @@ Re-resolution happens on every browser start, so after a browser update the modu
 ### 框架说明
 
 - **目标框架：LSPosed**（接口兼容标准 Xposed API）
-- 模块入口：`assets/xposed_init` → `com.sbplus.browser.MainHook`
+- 模块入口：`resources/META-INF/xposed/java_init.list` → `com.sbplus.browser.MainModule` → `MainHook`
 - 兼容：LSPosed 可加载，老 Xposed / EdXposed 理论上也可加载
 
 ### 使用前提
@@ -173,6 +189,23 @@ gradle assembleDebug --no-daemon
 
 产物：`app\build\outputs\apk\debug\app-debug.apk`
 
+Release 签名密码通过项目属性传入（不入库）：
+
+```bat
+gradle assembleRelease -PSBPLUS_STORE_PASSWORD=sbplus123 -PSBPLUS_KEY_PASSWORD=sbplus123 -PSBPLUS_KEY_ALIAS=sbplus
+```
+
+### 代码质量
+
+v2.5.3 经全面代码审核，修复 **5 Critical + 16 High** 级问题：
+
+- **资源泄漏**：`readFileBytes` / `readFileText` / `saveSource` / `getSource` / `copyFile` / Zip 导出导入流均加 try-finally；`HttpURLConnection.disconnect` 移入 finally；MediaPlayer 用 TextureView tag 跟踪 + `releaseVideoPlayerOf` 辅助方法统一释放。
+- **线程安全**：`sInjectedUrls` 改 `synchronizedMap(WeakHashMap)`；`sUserscriptRowPrefs/Metas` 改 `CopyOnWriteArrayList`；`sActiveScriptsByUrl` / `requireCache` / `resourceCache` 改 `ConcurrentHashMap`；`sNetworkSniffedUrls` add 加 synchronized + 上限 2000；`startToolbarIconSync` 改 `AtomicBoolean.compareAndSet`；`sToolbarParentCache` 加 `volatile`。
+- **空指针防护**：`UserscriptMeta.parse()` 返回值加 null 检查；6 个 UA 方法加 `sAppContext` null 检查；`parseAsc` 访问 `asc[2]` 前加越界检查。
+- **图标染色修复**：`ensureIconTint` 的 `setImageTintList` 移移到尺寸检查之后，skip 路径清除 colorFilter 残留；`computeIsBrowserUiIcon` 排除列表扩展 adblock/blocker/tracker/antitracking/plugin/extension，修复广告拦截器/插件页背景被误染色。
+- **性能优化**：`copyVideoToPublicDir` 改流式复制（不再全量读入内存）；`detectMediaType` 3 个正则预编译为 static Pattern；`applyKeepDebugSettings` 加 `sDebugHookInstalled` 标志位防重复 hook；CSS 注入加 `jsQuote` 转义辅助方法。
+- **UI 稳定性**：tabs_icon onDraw 加幂等检查 + 主题停用时清残留。
+
 ### 自适应说明
 
 模块对三星浏览器内部被混淆/随版本变化的类名与方法名做了**运行时自适应解析**，而非硬编码：
@@ -201,12 +234,18 @@ gradle assembleDebug --no-daemon
 SBPlus/
 ├── app/
 │   ├── build.gradle              (namespace/applicationId = com.sbplus.browser)
+│   ├── libs/libxposed-api-102.jar (Xposed API 编译期依赖)
 │   └── src/main/
 │       ├── AndroidManifest.xml   (xposedmodule 声明)
-│       ├── assets/xposed_init    (模块入口)
+│       ├── resources/META-INF/xposed/  (LSPosed 模块元数据)
+│       │   ├── java_init.list    (模块入口类)
+│       │   ├── module.prop       (模块属性)
+│       │   └── scope.list        (作用域包名)
 │       ├── res/values/           (app_name=SBPlus, xposedscope)
 │       └── java/com/sbplus/browser/
-│           ├── MainHook.java               (核心 hook，功能 1-13)
+│           ├── MainHook.java               (核心 hook，功能 1-14)
+│           ├── MainModule.java             (LSPosed 模块入口)
+│           ├── XC_MethodHook.java          (Xposed hook 基类)
 │           ├── MainActivity.java           (模块首页/版本号/更新检测)
 │           ├── UpdateChecker.java          (GitHub 最新版本查询)
 │           ├── MenuReorderHelper.java      (网格菜单拖拽排序)
