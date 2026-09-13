@@ -53,12 +53,6 @@ gradle assembleDebug --no-daemon
 
 Output: `app\build\outputs\apk\debug\app-debug.apk`
 
-Release signing passwords are passed via project properties (not committed):
-
-```bat
-gradle assembleRelease -PSBPLUS_STORE_PASSWORD=sbplus123 -PSBPLUS_KEY_PASSWORD=sbplus123 -PSBPLUS_KEY_ALIAS=sbplus
-```
-
 
 ### Self-adaptation
 
@@ -151,12 +145,6 @@ gradle assembleDebug --no-daemon
 ```
 
 产物：`app\build\outputs\apk\debug\app-debug.apk`
-
-Release 签名密码通过项目属性传入（不入库）：
-
-```bat
-gradle assembleRelease -PSBPLUS_STORE_PASSWORD=sbplus123 -PSBPLUS_KEY_PASSWORD=sbplus123 -PSBPLUS_KEY_ALIAS=sbplus
-```
 
 
 ### 自适应说明
