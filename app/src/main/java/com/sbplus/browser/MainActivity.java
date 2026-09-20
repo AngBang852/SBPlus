@@ -30,15 +30,20 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // 把版本号写入 prefs，供浏览器进程的 SBPlus 菜单读取（XSharedPreferences）。
-        // 注意：必须用 makeWorldReadable 让浏览器进程（不同 UID）可读，否则读到旧值/空值。
+        // 把版本号写入 prefs，供浏览器进程的 SBPlus 菜单读取。
+        // 浏览器进程通过 MainModule.getRemotePreferences(PREFS_NAME) 读取
+        // (见 MainHook.readModuleVersion),该通道不受文件权限位限制,
+        // 因此普通的 apply() 即可,无需让 prefs 世界可读。
+        //
+        // 原先这里在 apply() 之后又跟了一句
+        //   try { getSharedPreferences(...).edit().commit(); } catch (Throwable ignored) {}
+        // 这是死代码:它提交的是一个**全新的空编辑器**,与上面那次写入无关,
+        // 既不会改变已写入的值,也解决不了任何跨进程可见性问题(注释里设想的
+        // makeWorldReadable 从未被调用)。删除即可,行为不变。
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .putString(KEY_VERSION_NAME, BuildConfig.VERSION_NAME)
                 .putInt(KEY_VERSION_CODE, BuildConfig.VERSION_CODE)
                 .apply();
-        try {
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().commit();
-        } catch (Throwable ignored) {}
 
         mVersionView = findViewById(R.id.tv_version);
         TextView projectView = findViewById(R.id.tv_project);

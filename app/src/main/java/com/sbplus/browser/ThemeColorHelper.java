@@ -33,11 +33,16 @@ public final class ThemeColorHelper {
     public static final int S_SWITCH_ON = 7;
     public static final int S_SWITCH_THUMB = 8;
     public static final int S_SWITCH_OFF = 9;
+    /** 主页时钟文字色(2026-09-19 新增, 主页美化)。 */
+    public static final int S_CLOCK = 10;
+    /** 主页日期文字色(独立于时钟, 2026-09-19 新增)。 */
+    public static final int S_DATE = 11;
 
     private static final String[] KEYS = {
         "theme_home_icon", "theme_home_text", "theme_settings_title", "theme_settings_desc",
         "theme_settings_bg", "theme_web_text", "theme_web_bg",
-        "theme_switch_on", "theme_switch_thumb", "theme_switch_off"
+        "theme_switch_on", "theme_switch_thumb", "theme_switch_off",
+        "theme_clock", "theme_date"
     };
 
     // 色板
@@ -62,13 +67,35 @@ public final class ThemeColorHelper {
     private static volatile boolean sCacheReady;
     private static SharedPreferences.OnSharedPreferenceChangeListener sPrefListener;
 
+    /**
+     * 连续读取失败的次数。
+     *
+     * <p>用途是**退避**而非固化:读失败时我们既不能把「读不到」当成「全部未设置」
+     * 固化下来(那会让主题色静默失效且永不恢复),也不能让每次 {@code getSlot}
+     * 都重新抛一次异常——本方法在主题着色路径上按帧被调用,
+     * 持续故障时每次都要进 synchronized 并走一次失败的 getSharedPreferences,
+     * 那会把一个正确性问题换成性能问题。
+     *
+     * <p>因此:前几次失败立刻重试(覆盖瞬时故障);连续失败达到阈值后暂停重试,
+     * 直到 {@link #invalidateCache()} 被调用(配置变更时会走这里)。
+     */
+    private static volatile int sFailCount;
+    private static final int FAIL_BACKOFF_THRESHOLD = 3;
+
     /** 让缓存失效,下次读取重新快照。 */
-    public static void invalidateCache() { sCacheReady = false; }
+    public static void invalidateCache() {
+        sCacheReady = false;
+        sFailCount = 0;      // 配置变更 -> 允许立刻重试
+    }
 
     private static void ensureCache(Context ctx) {
         if (sCacheReady) return;
+        // 连续失败已达阈值:退避,直接返回(不置 sCacheReady,配置变更时由
+        // invalidateCache 复位)。调用方读到的仍是上一份有效快照或 null。
+        if (sFailCount >= FAIL_BACKOFF_THRESHOLD) return;
         synchronized (ThemeColorHelper.class) {
             if (sCacheReady) return;
+            if (sFailCount >= FAIL_BACKOFF_THRESHOLD) return;
             int[] arr = new int[KEYS.length];
             boolean master = false;
             boolean any = false;
@@ -87,9 +114,18 @@ public final class ThemeColorHelper {
                     };
                     sp.registerOnSharedPreferenceChangeListener(sPrefListener);
                 }
-            } catch (Throwable ignored) {
-                for (int i = 0; i < arr.length; i++) arr[i] = -1;
+            } catch (Throwable t) {
+                // 读取失败必须**保持未就绪**,否则会把「读不到」固化成
+                // 「已就绪且全部未设置」——后果是主题色整体静默失效:用户之后
+                // 改颜色也不生效(因为 sCacheReady 已为 true,ensureCache 直接返回),
+                // 且没有任何日志可查。这是本类最隐蔽的一个缺陷。
+                sFailCount++;
+                MainModule.logMsg("[SBPlus] ThemeColorHelper cache read failed ("
+                        + sFailCount + "/" + FAIL_BACKOFF_THRESHOLD + "), will retry: " + t);
+                // 不写任何缓存字段、不置 sCacheReady —— 下次调用重新尝试。
+                return;
             }
+            sFailCount = 0;
             sSlotCache = arr;
             sMasterCache = master;
             sAnySetCache = any;
@@ -102,6 +138,13 @@ public final class ThemeColorHelper {
             ensureCache(ctx);
             int[] c = sSlotCache;
             if (c != null && slot >= 0 && slot < c.length) return c[slot];
+            // 缓存尚未建立(冷启动或刚失效)时的直读兜底,保证读得到真值。
+            // 但若已进入失败退避期,就不要再走这条路径:它在主题着色路径上按帧
+            // 被调用,持续故障时每次直读都会进一次 synchronized 并抛异常,
+            // 把一个正确性问题变成性能问题。此时返回 -1 等价于"未设置"(用默认色),
+            // 且 invalidateCache()(配置变更时触发)会复位退避、恢复正常读取。
+            if (sFailCount >= FAIL_BACKOFF_THRESHOLD) return -1;
+            if (slot < 0 || slot >= KEYS.length) return -1;
             return ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE).getInt(KEYS[slot], -1);
         } catch (Throwable t) { return -1; }
     }
@@ -116,7 +159,6 @@ public final class ThemeColorHelper {
         try { ensureCache(ctx); return sAnySetCache; } catch (Throwable t) { return false; }
     }
 
-    public static boolean isSet(Context ctx, int slot) { return getSlot(ctx, slot) != -1; }
     public static void setSlot(Context ctx, int slot, int color) {
         try { ctx.getSharedPreferences(prefName(), Context.MODE_PRIVATE).edit().putInt(KEYS[slot], color).apply(); }
         catch (Throwable ignored) {}
@@ -188,17 +230,17 @@ public final class ThemeColorHelper {
 
     // 分组定义
     static final int[][] CHILDREN = {
-        null, null,
+        null, null, null, null,
         new int[]{ S_SETTINGS_TITLE, S_SETTINGS_DESC },   // 设置文字 -> 标题/说明
         null, null, null,
         new int[]{ S_SWITCH_ON, S_SWITCH_THUMB, S_SWITCH_OFF }   // 开关 -> 3 色
     };
-    static final String[] ROOT_ZH = { "主页图标","主页文字","设置文字","设置页大栏目背景色","网页文字","网页背景","开关" };
+    static final String[] ROOT_ZH = { "主页图标","主页文字","主页时钟","主页日期","设置文字","设置页大栏目背景色","网页文字","网页背景","开关" };
     static final String[][] CHILD_ZH = {
-        null, null, { "标题","说明" }, null, null, null,
+        null, null, null, null, { "标题","说明" }, null, null, null,
         { "开启色","滑块色(拇指)","关闭色" }
     };
-    static final int[] ROOT_SLOT = { S_HOME_ICON, S_HOME_TEXT, -1, S_SETTINGS_BG, S_WEB_TEXT, S_WEB_BG, -1 };
+    static final int[] ROOT_SLOT = { S_HOME_ICON, S_HOME_TEXT, S_CLOCK, S_DATE, -1, S_SETTINGS_BG, S_WEB_TEXT, S_WEB_BG, -1 };
 
     /** level 0=主列表, 1=子列表(rootIndex 指定父行). */
     static void showList(final Context ctx, int rootIndex) {
@@ -213,7 +255,7 @@ public final class ThemeColorHelper {
                 slots = rows;
                 title = labels[0].length() > 0 ? ROOT_ZH[parentRoot] : ROOT_ZH[parentRoot];
             } else {
-                rows = new int[]{0,1,2,3,4,5,6};
+                rows = new int[]{0,1,2,3,4,5,6,7,8};
                 labels = ROOT_ZH;
                 slots = ROOT_SLOT;
                 title = "自定义主题色";
@@ -263,15 +305,16 @@ public final class ThemeColorHelper {
                 if (slot == -1) {
                     final int childEntry = rows[i];
                     row.setOnClickListener(new View.OnClickListener() {
-                        @Override public void onClick(View v) { showList(ctx, childEntry); }
+                        @Override public void onClick(View v) { reopenList(ctx, childEntry); }
                     });
                 } else {
+                    final int fSlot = slot;
                     row.setOnClickListener(new View.OnClickListener() {
-                        @Override public void onClick(View v) { showColorPicker(ctx, slot, getSlot(ctx, slot)); }
+                        @Override public void onClick(View v) { openPickerAfterDismiss(ctx, fSlot, getSlot(ctx, fSlot)); }
                     });
                     row.setOnLongClickListener(new View.OnLongClickListener() {
                         @Override public boolean onLongClick(View v) {
-                            clearSlot(ctx, slot); showList(ctx, isChild ? parentRoot : 0);
+                            clearSlot(ctx, fSlot); reopenList(ctx, isChild ? parentRoot : 0);
                             toast(ctx, "已恢复默认"); return true;
                         }
                     });
@@ -281,12 +324,55 @@ public final class ThemeColorHelper {
 
             android.widget.ScrollView sv = new android.widget.ScrollView(ctx);
             sv.addView(ll);
-            new android.app.AlertDialog.Builder(ctx)
+            // "完成"必须给一个**非 null** 监听器(2026-09-17 修正)。
+            // 原先传 null:AlertDialog 对 null 监听器的按钮处理在各 ROM 上表现不一,
+            // 部分三星固件下点了不关闭对话框,用户以为没生效就反复点——
+            // 这正是"点完成要按好几次"的来源。传一个显式关闭的监听器即可,
+            // 本页无待提交状态(颜色是点子项时立即写入的)。
+            sCurrentDialog = new android.app.AlertDialog.Builder(ctx)
                 .setTitle(title + (isChild ? "" : "\n(长按某项恢复默认)"))
                 .setView(sv)
-                .setPositiveButton("完成", null)
-                .show();
+                .setPositiveButton("完成", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) { d.dismiss(); }
+                })
+                .create();
+            sCurrentDialog.show();
         } catch (Throwable t) { log("list: " + t); }
+    }
+
+    /**
+     * 当前打开的颜色配置对话框(列表页或取色页)。
+     *
+     * <p>2026-09-17:用于消除对话框叠加。
+     *
+     * <p>原有三处入口——点父行进入子列表({@code showList})、点子项进入取色页
+     * ({@code showColorPicker})、长按恢复默认后回到列表——都是**直接 show 一个
+     * 新对话框,而不关闭旧的**。于是每操作一次就叠一层,用户看到的是"点了没反应",
+     * 必须连点好几次穿透上层才能点到底下的目标。长按恢复那条尤其明显:
+     * 它在 L312 先 clearSlot 再 showList,叠加的同时配置已经被改了。
+     *
+     * <p>改为持有引用:新对话框 show 之前先把旧的 dismiss 掉,始终保持只有一层。
+     */
+    private static volatile android.app.AlertDialog sCurrentDialog;
+
+    /** 关掉当前对话框并重新打开颜色列表(用于长按恢复默认后刷新)。 */
+    private static void reopenList(final Context ctx, final int rootIndex) {
+        dismissCurrent();
+        showList(ctx, rootIndex);
+    }
+
+    /** 关掉当前对话框并打开取色页(用于点叶子项)。 */
+    private static void openPickerAfterDismiss(final Context ctx, final int slot, final int current) {
+        dismissCurrent();
+        showColorPicker(ctx, slot, current);
+    }
+
+    private static void dismissCurrent() {
+        android.app.AlertDialog d = sCurrentDialog;
+        sCurrentDialog = null;
+        if (d != null && d.isShowing()) {
+            try { d.dismiss(); } catch (Throwable ignored) {}
+        }
     }
 
     // ================= 颜色选择 =================
@@ -350,7 +436,7 @@ public final class ThemeColorHelper {
             presetRow.addView(hs, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
             root.addView(presetRow);
 
-            new android.app.AlertDialog.Builder(ctx)
+            sCurrentDialog = new android.app.AlertDialog.Builder(ctx)
                 .setTitle(labelFor(slot))
                 .setView(root)
                 .setPositiveButton("保存", new android.content.DialogInterface.OnClickListener() {
@@ -361,7 +447,8 @@ public final class ThemeColorHelper {
                     }
                 })
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+            sCurrentDialog.show();
         } catch (Throwable t) { log("picker: " + t); }
     }
 
@@ -377,6 +464,8 @@ public final class ThemeColorHelper {
             case S_SWITCH_ON: return "开关 · 开启色";
             case S_SWITCH_THUMB: return "开关 · 滑块色";
             case S_SWITCH_OFF: return "开关 · 关闭色";
+            case S_CLOCK: return "主页时钟";
+            case S_DATE: return "主页日期";
             default: return "颜色";
         }
     }
@@ -399,7 +488,6 @@ public final class ThemeColorHelper {
     static View spacer(Context ctx, int h) { View v = new View(ctx); v.setLayoutParams(new LinearLayout.LayoutParams(1, h)); return v; }
     static void toast(Context ctx, String msg) { try { android.widget.Toast.makeText(ctx, msg, 0).show(); } catch (Throwable ignored) {} }
     static void log(String msg) { try { MainModule.logMsg("[SBPlus] themecolor " + msg); } catch (Throwable ignored) {} }
-    static Context getCtx(Object pref) { try { return (Context) MainHook.callMethod(pref, "getContext"); } catch (Throwable t) { return null; } }
     static void setProperty(Object obj, String method, Object arg) {
         try { MainHook.callMethod(obj, method, arg); } catch (Throwable t) { log("call " + method + " err " + t); }
     }

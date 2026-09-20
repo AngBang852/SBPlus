@@ -12,23 +12,60 @@ android {
         targetSdk 34
         versionCode 10
         versionName "2.5.3"
+
+        // 把版本号注入到普通类也能读到的位置。
+        // 背景:MainHook 运行在**三星浏览器进程**里,加载不到模块自己的 BuildConfig,
+        // 也没法从 prefs 保证读到(MainActivity 没打开过就是空),所以它需要一个
+        // 编译期就固化的兜底版本号。以前是手写常量,已经漂移到 2.5.1(实际 2.5.3)。
+        // 这里由 Gradle 注入,以后只改上面 versionName 一处,两边自动一致。
+        // 字段名必须叫 SBPLUS_VERSION,MainHook.APP_VERSION 会优先读它。
+        buildConfigField "String", "SBPLUS_VERSION", "\"${versionName}\""
     }
 
     signingConfigs {
         release {
-            storeFile file("../release.keystore")
-            // 签名密码在本地 ~/.gradle/gradle.properties 提供(SBPLUS_*), 不提交到仓库
-            storePassword project.findProperty("SBPLUS_STORE_PASSWORD") ?: ""
-            keyAlias project.findProperty("SBPLUS_KEY_ALIAS") ?: "sbplus"
-            keyPassword project.findProperty("SBPLUS_KEY_PASSWORD") ?: ""
+            // 签名密码在本地 ~/.gradle/gradle.properties 提供(SBPLUS_*), 不提交到仓库。
+            // 关键:只有在两个密码都齐备时才注册签名配置的 storeFile——否则
+            // assembleRelease 会"成功"产出一个用空口令签名的 APK,安装时报
+            // "应用未安装",而错误要到发布之后才暴露。缺失时由下面的 buildTypes
+            // 让 release 构建显式失败。
+            def storePass = project.findProperty("SBPLUS_STORE_PASSWORD")
+            def keyPass = project.findProperty("SBPLUS_KEY_PASSWORD")
+            if (storePass && keyPass) {
+                storeFile file("../release.keystore")
+                storePassword storePass
+                keyAlias project.findProperty("SBPLUS_KEY_ALIAS") ?: "sbplus"
+                keyPassword keyPass
+            }
         }
     }
 
     buildTypes {
         release {
+            // 反射解析宿主(三星浏览器)的混淆后类名/方法名依赖原样保留的字符串,
+            // 开启收缩会立刻引发大面积 NoSuchMethodError,故显式关闭。
+            // 注意:原实现同时列出了 proguardFiles,但 proguardFiles 仅在
+            // minifyEnabled true 时参与——留着它只会让后来者误以为 release
+            // 已做优化混淆,故一并删除。
             minifyEnabled false
-            signingConfig signingConfigs.release
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            shrinkResources false
+            // 用 hasProperty 兜底:未设置 storeFile 时该属性可能不存在,
+            // 直接读属性在某些 AGP 版本上会抛 MissingPropertyException。
+            def configured = signingConfigs.release.hasProperty("storeFile")
+                    && signingConfigs.release.storeFile != null
+            if (configured) {
+                signingConfig signingConfigs.release
+            } else {
+                gradle.taskGraph.whenReady { graph ->
+                    if (graph.hasTask(":app:assembleRelease")
+                            || graph.hasTask(":app:bundleRelease")) {
+                        throw new GradleException(
+                                "缺少 SBPLUS_STORE_PASSWORD / SBPLUS_KEY_PASSWORD," +
+                                        "拒绝产出未签名的 release 包。" +
+                                        "请在 ~/.gradle/gradle.properties 中配置后重试。")
+                    }
+                }
+            }
         }
     }
 

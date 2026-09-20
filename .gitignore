@@ -52,3 +52,7 @@ tests/
 _*.ts
 # temp jar extract
 tmp_jar_extract/
+
+# 本地验证脚本(临时编译运行的小程序,不属于源码)
+_verify*/
+_verify*/*.class

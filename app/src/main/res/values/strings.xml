@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name" translatable="false">SBPlus</string>
-    <string name="version_label" translatable="false">版本 1.0</string>
+    <!-- 曾经有个 version_label="版本 1.0" 在这里,既无人引用又早已过时(实际 2.5.3),
+         属于会误导后来者的死资源,已删除。界面上显示的版本号统一走
+         MainActivity 的 BuildConfig.VERSION_NAME,不要在资源里再放一份。 -->
     <string name="module_desc" translatable="false">SBPlus - Samsung Internet enhancement module (LSPosed): download bridge, media sniffer, userscript manager, UA spoofing, region switch, homepage beautify and more. | 三星浏览器增强模块（LSPosed）：下载桥接、媒体嗅探、油猴脚本、UA伪装、改区、主页美化等。</string>
 
     <!-- target downloader default config -->

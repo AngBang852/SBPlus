@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  日志管理页布局。
+
+  2026-09-17:原先本页在 LogManagerActivity.onCreate 里用纯代码构建视图,
+  而 MainActivity 用的是 XML —— 同一项目内两种风格并存,维护时需要在脑内
+  把一份界面翻译成另一份。此处抽出为 XML,与 activity_main.xml 保持一致
+  (同样的 #F5F5F5 背景、20dp 内容边距、16sp 主标题 / 13sp 次要文本的层级)。
+
+  有意**不**放进 XML 的部分(仍是代码设置,因为是运行时数据或行为):
+    · 两个 EditText 的初值(读自 SharedPreferences)
+    · 日志正文 TextView 的文本
+    · 全部点击监听
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F5F5F5">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="日志保留策略"
+            android:textSize="15sp"
+            android:textColor="#1B1B1B" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="保留天数（超过此天数的日志自动删除）"
+            android:textSize="12sp"
+            android:textColor="#666666"
+            android:paddingTop="12dp"
+            android:paddingBottom="4dp" />
+
+        <EditText
+            android:id="@+id/et_keep_days"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:hint="默认 7 天"
+            android:inputType="number" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="容量上限（日志总大小超过此值，自动删除最早的日志）"
+            android:textSize="12sp"
+            android:textColor="#666666"
+            android:paddingTop="12dp"
+            android:paddingBottom="4dp" />
+
+        <EditText
+            android:id="@+id/et_max_mb"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:hint="默认 10 MB"
+            android:inputType="number" />
+
+        <Button
+            android:id="@+id/btn_save"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="保存设置" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_view"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="刷新日志" />
+
+            <Button
+                android:id="@+id/btn_export"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="导出" />
+
+            <Button
+                android:id="@+id/btn_delete"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="删除" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tv_logs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:textIsSelectable="true"
+            android:textSize="11sp"
+            android:textColor="#333333"
+            android:typeface="monospace"
+            android:text="点击「刷新日志」以查看" />
+
+    </LinearLayout>
+</ScrollView>

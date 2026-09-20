@@ -3,8 +3,26 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 日志写入用签名级权限:只有与模块同签名的 APK 才能调用 LogProvider。
+         浏览器进程内的 hook 通过 ContentResolver 访问 provider —— 它属于三星浏览器
+         (不同 UID、不同签名),但 ContentResolver 调用走的是"调用方进程的权限",
+         因此这里必须允许跨应用访问,故对该权限声明 protectionLevel="signature"
+         只能防住第三方 App。对三星浏览器本身的访问由下面的 extra 白名单兜住。 -->
+    <permission
+        android:name="com.sbplus.browser.permission.ACCESS_LOG"
+        android:protectionLevel="signature" />
+
+    <uses-permission android:name="com.sbplus.browser.permission.ACCESS_LOG" />
+
+    <!-- allowBackup 关闭的原因:本模块的 SharedPreferences 保存 UA 伪装、Cookie 导入、
+         下载器接管等配置,日志库则保存页面 URL 与接口参数。allowBackup="true" 时,
+         在已 root(装 LSPosed 的前置条件)的设备上可通过 adb backup / 云备份把这些
+         数据完整带离设备,绕过应用沙箱;换机恢复还会把旧 Cookie 静默带到新设备。
+         若日后确需恢复备份能力,必须用 android:dataExtractionRules 显式排除
+         sharedpref / database / file 三个域,而不是直接打开这个开关。 -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:description="@string/module_desc"
@@ -21,7 +39,15 @@
             </intent-filter>
         </activity>
 
-        <!-- Log store: the hook (browser process) reports logs to this app via provider. -->
+        <!-- Log store: the hook (browser process) reports logs to this app via provider.
+
+             越权防护说明(重要):这里**不能**用 android:permission="...signature"——
+             框架会在进入 provider 之前就做权限校验,而合法的调用方是三星浏览器
+             (不同签名、不同 UID),加了 signature 会让 hook 再也写不进日志。
+             因此真正的准入控制放在 LogProvider.assertCallerAllowed() 里:
+             只放行「本进程 / 持签名级权限者 / 三星浏览器包名白名单」,其余一律
+             SecurityException。这样既保住功能,又挡掉第三方 App 读取 hook 调试日志
+             (含页面 URL 与接口参数)、伪造日志、或一次性清空全部日志。 -->
         <provider
             android:name=".LogProvider"
             android:authorities="com.sbplus.browser.log"

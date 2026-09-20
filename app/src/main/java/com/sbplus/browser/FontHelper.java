@@ -60,14 +60,35 @@ public final class FontHelper {
     private static volatile String sCfgPath = "";
     private static volatile boolean sCfgShouldApply;
     private static SharedPreferences.OnSharedPreferenceChangeListener sCfgListener;
+    /** 监听器实际注册到哪个 SharedPreferences 实例上(反注册时要用同一个)。 */
+    private static SharedPreferences sCfgListenerPrefs;
 
     /** 让字体配置缓存失效(选择/开关变更后调用)。 */
-    public static void invalidateCache() { sCfgReady = false; }
+    public static void invalidateCache() {
+        sCfgReady = false;
+        sCfgFailCount = 0;      // 配置变更 -> 允许立刻重试
+    }
+
+    /**
+     * 连续读取失败的次数(退避用)。
+     *
+     * <p>与 {@code ThemeColorHelper} 同一处缺陷的两份拷贝:原实现在 catch 里
+     * 什么都不做,随后**无条件**把 {@code sCfgReady} 置 true —— 于是"读不到配置"
+     * 被固化成"已就绪且字体关闭"。后果是字体功能静默失效且永不恢复:
+     * 用户在设置页选好字体开关打开,回到页面依然不生效,而任何日志都没有。
+     *
+     * <p>退避(而非无脑重试)的理由相同:{@link #shouldApply} 在文本渲染路径上
+     * 被高频调用,若持续失败还每次都重试,会把正确性问题变成性能问题。
+     */
+    private static volatile int sCfgFailCount;
+    private static final int CFG_FAIL_BACKOFF_THRESHOLD = 3;
 
     private static void ensureCfg(Context ctx) {
         if (sCfgReady) return;
+        if (sCfgFailCount >= CFG_FAIL_BACKOFF_THRESHOLD) return;
         synchronized (FontHelper.class) {
             if (sCfgReady) return;
+            if (sCfgFailCount >= CFG_FAIL_BACKOFF_THRESHOLD) return;
             boolean en = false;
             String sel = "";
             String path = "";
@@ -87,13 +108,47 @@ public final class FontHelper {
                         }
                     };
                     p.registerOnSharedPreferenceChangeListener(sCfgListener);
+                    sCfgListenerPrefs = p;
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                // 读失败:保持未就绪 + 不写任何缓存字段,下次(或配置变更后)重试。
+                sCfgFailCount++;
+                XposedBridgeLog("ensureCfg read failed (" + sCfgFailCount
+                        + "/" + CFG_FAIL_BACKOFF_THRESHOLD + "), will retry: " + t);
+                return;
+            }
+            sCfgFailCount = 0;
             sCfgEnabled = en;
             sCfgSelected = sel;
             sCfgPath = path;
             sCfgShouldApply = en && !path.isEmpty();
             sCfgReady = true;
+        }
+    }
+
+    /**
+     * 反注册监听器(2026-09-17 新增)。
+     *
+     * <p>原实现只注册、从不反注册:监听器被 SharedPreferences 持有,而
+     * {@code SharedPreferences} 又被系统按名缓存,于是本类的监听器会在进程
+     * 生命周期内一直存活。更麻烦的是换 SharedPreferences 实例后,
+     * {@code sCfgListener != null} 使新实例上不再注册,旧实例上的监听器却
+     * 还在触发 —— 配置变更通知会错乱。
+     *
+     * <p>由 {@code MainModule} 在宿主上下文销毁 / 模块卸载路径上调用;
+     * 也可在确定不再需要时调用。可重复调用(幂等)。
+     */
+    public static void unregisterListener() {
+        synchronized (FontHelper.class) {
+            try {
+                if (sCfgListener != null && sCfgListenerPrefs != null) {
+                    sCfgListenerPrefs.unregisterOnSharedPreferenceChangeListener(sCfgListener);
+                }
+            } catch (Throwable t) {
+                XposedBridgeLog("unregisterListener err: " + t);
+            }
+            sCfgListener = null;
+            sCfgListenerPrefs = null;
         }
     }
 
@@ -123,6 +178,12 @@ public final class FontHelper {
             if (fs != null) {
                 for (File f : fs) {
                     String n = f.getName().toLowerCase();
+                    // 顺带清理残留的 .tmp:addFontFromUri 写临时文件后若进程被杀,
+                    // 临时文件会留在目录里(它不被本方法列出,但会占空间)。
+                    if (n.endsWith(".tmp")) {
+                        try { f.delete(); } catch (Throwable ignored) {}
+                        continue;
+                    }
                     if (f.isFile() && (n.endsWith(".ttf") || n.endsWith(".otf"))) {
                         out.add(f.getName());
                     }
@@ -176,33 +237,86 @@ public final class FontHelper {
     public static boolean addFontFromUri(Context ctx, android.net.Uri uri) {
         java.io.InputStream in = null;
         java.io.OutputStream out = null;
+        File tmpFile = null;
+        File target = null;
         try {
             String display = queryDisplayName(ctx, uri);
             boolean isOtf = display != null && display.toLowerCase().endsWith(".otf");
             String name = "font_" + System.currentTimeMillis() + (isOtf ? ".otf" : ".ttf");
-            File target = new File(dir(ctx), name);
+            target = new File(dir(ctx), name);
             int k = 1;
             while (target.exists()) {
                 target = new File(dir(ctx), (isOtf ? "font_o" : "font_") + (System.currentTimeMillis() + (k++)) + (isOtf ? ".otf" : ".ttf"));
             }
             in = ctx.getContentResolver().openInputStream(uri);
             if (in == null) { XposedBridgeLog("add font: openInputStream null for " + uri); return false; }
-            out = new java.io.FileOutputStream(target);
-            byte[] tmp = new byte[65536];
+
+            // 先写临时文件、校验后再 rename 到位(2026-09-17 修正)。
+            // 原实现直接写目标文件:一旦中途失败(URI 被回收、磁盘满、进程被杀),
+            // 目录里会留下一个**半截的 .ttf/.otf**——它会被 listFonts 列出、
+            // 可以被选中,而 loadTypeface 因文件已损坏返回 null,表现为
+            // "选了字体但不生效"且没有任何错误提示。tmp + 原子 rename 消除该状态。
+            tmpFile = new File(dir(ctx), name + ".tmp");
+            out = new java.io.FileOutputStream(tmpFile);
+            byte[] buf = new byte[65536];
+            long total = 0;
             int r;
-            while ((r = in.read(tmp)) > 0) out.write(tmp, 0, r);
-            out.flush(); out.close(); out = null;
+            // != -1 而非 > 0:InputStream 允许返回 0,用 > 0 会在返回 0 时
+            // 静默提前结束复制,得到一个被截断的字体文件。
+            while ((r = in.read(buf)) != -1) {
+                if (r > 0) { out.write(buf, 0, r); total += r; }
+            }
+            out.flush();
+            out.close(); out = null;
             in.close(); in = null;
+
+            // 长度校验:空文件必然无效;与源声明长度不符也可疑。
+            // (部分 ContentProvider 不返回 SIZE,故只在能取到时才比对。)
+            if (total <= 0) {
+                XposedBridgeLog("add font: empty source, abort");
+                return false;
+            }
+            long declared = querySize(ctx, uri);
+            if (declared > 0 && declared != total) {
+                XposedBridgeLog("add font: size mismatch declared=" + declared + " copied=" + total + ", abort");
+                return false;
+            }
+            // 校验通过 -> 原子落入目标名。rename 在同一目录内是原子的。
+            if (!tmpFile.renameTo(target)) {
+                XposedBridgeLog("add font: rename failed " + tmpFile + " -> " + target);
+                return false;
+            }
+            tmpFile = null;     // 已改名,finally 不必再清理
+
             // 保存显示名->存储名 映射(供列表显示原文件名)
             String stored = target.getName();
             mapSaveDisplay(ctx, stored, (display == null || display.isEmpty()) ? stored : display);
-            XposedBridgeLog("add font OK -> " + target.getAbsolutePath() + " display=" + display);
+            XposedBridgeLog("add font OK -> " + target.getAbsolutePath() + " display=" + display + " bytes=" + total);
             return true;
         } catch (Throwable t) { XposedBridgeLog("add font err: " + t); return false; }
         finally {
             if (in != null) try { in.close(); } catch (Throwable ignored) {}
             if (out != null) try { out.close(); } catch (Throwable ignored) {}
+            // 失败路径:清掉临时文件,不留垃圾。
+            if (tmpFile != null) try { if (tmpFile.exists()) tmpFile.delete(); } catch (Throwable ignored) {}
         }
+    }
+
+    /** 取 URI 声明的文件大小;取不到返回 -1。 */
+    private static long querySize(Context ctx, android.net.Uri uri) {
+        android.database.Cursor cur = null;
+        try {
+            cur = ctx.getContentResolver().query(uri, null, null, null, null);
+            if (cur != null && cur.moveToFirst()) {
+                int idx = cur.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                if (idx >= 0 && !cur.isNull(idx)) return cur.getLong(idx);
+            }
+        } catch (Throwable ignored) {
+            // 取不到不影响主流程(部分 Provider 不提供 SIZE)
+        } finally {
+            if (cur != null) try { cur.close(); } catch (Throwable ignored) {}
+        }
+        return -1;
     }
 
     // 显示名映射: prefs map "font_display_<storedName>" -> 原文件名
@@ -305,8 +419,33 @@ public final class FontHelper {
                 }
             });
             b.setNegativeButton("关闭", null);
-            b.show();
+            sCurrentDialog = b.show();
         } catch (Throwable t) { XposedBridgeLog("openList err: " + t); }
+    }
+
+    /**
+     * 当前打开的字体列表对话框。
+     *
+     * <p>2026-09-17:用于"选中某行后立刻刷新选中态"。
+     *
+     * <p>原实现里,行点击只写配置、**不刷新列表**,于是用户点了字体看不到
+     * 选中标记(高亮 + "[使用中]" 前缀),必须关掉对话框重进才能看到 ——
+     * 而后台的字体应用其实已经生效了,造成"界面没反应、实际变了"的割裂感。
+     * 对照之下,同一个类的"删除"按钮是刷新了的(它在按钮回调里重建列表),
+     * 但行点击不能照搬:按钮点击会让 AlertDialog 自动关闭,旧框消失后
+     * 新框是替换关系;而行点击不会关闭对话框,直接再 show 一个会叠两层。
+     * 故这里持有引用,dismiss 掉旧的再重建。
+     */
+    private static volatile android.app.AlertDialog sCurrentDialog;
+
+    /** 关闭并重建字体列表,使选中态立即反映最新配置。 */
+    private static void refreshList(final Context ctx) {
+        android.app.AlertDialog d = sCurrentDialog;
+        sCurrentDialog = null;
+        if (d != null && d.isShowing()) {
+            try { d.dismiss(); } catch (Throwable ignored) {}
+        }
+        openList(ctx);
     }
 
     private static android.view.View buildFontRow(final Context ctx, final String name, boolean used, final android.app.Activity act) {
@@ -332,17 +471,20 @@ public final class FontHelper {
             @Override public void onClick(android.view.View v) {
                 deleteFont(ctx, name);
                 toast(ctx, "已删除: " + name);
-                openList(ctx);
+                refreshList(ctx);
             }
         });
         row.addView(del);
 
-        // 点行选中
+        // 点行选中。
+        // 选中后必须重建列表,否则看不到选中态(高亮 + "[使用中]" 前缀)——
+        // 用户会以为没点上,反复点;而字体其实已经写进配置并生效了。
         row.setOnClickListener(new android.view.View.OnClickListener() {
             @Override public void onClick(android.view.View v) {
                 selectFont(ctx, name);
                 setEnabled(ctx, true);
                 toast(ctx, "字体已应用: " + name);
+                refreshList(ctx);
             }
         });
         return row;

@@ -17,7 +17,14 @@ public abstract class XC_MethodHook {
         private Object result = null;
         public java.lang.reflect.Method method;
         public Throwable throwable;
-        public boolean hasThrowable = false;
+        // 2026-09-17:删除 public boolean hasThrowable 字段。
+        // 它与下面的 hasThrowable() **方法**同名,是一个易踩的陷阱:
+        // 字段全项目无人读写(唯一的"使用"是 MainHook 里 6 处
+        // param.hasThrowable() 调用,那些调用的是**方法**),
+        // 但字段是 public 且永远为 false,一旦有人误写成
+        // `if (param.hasThrowable) throw param.getThrowable();`(漏掉括号)
+        // 就会编译通过、判断恒为 false —— 表现为"宿主方法抛出的异常被静默吞掉",
+        // 极难排查。删掉字段后这种笔误会直接编译失败,反而更安全。
 
         public Object getResult() {
             return result;

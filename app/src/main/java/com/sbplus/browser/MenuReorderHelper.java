@@ -64,8 +64,6 @@ public final class MenuReorderHelper {
     private static volatile float sTouchOffsetX = 0f;
     private static volatile float sTouchOffsetY = 0f;
 
-    public static boolean isEditMode() { return sEditMode; }
-
     public static void setClassLoader(ClassLoader cl) { sCl = cl; }
 
     public static void cacheRefs(Object handler, Object recycler, Object adapter,
@@ -153,7 +151,10 @@ public final class MenuReorderHelper {
                 if (addPos >= 0 && isTapOnPosition(rx, ry, addPos)) {
                     MainModule.logMsg("[SBPlus] add cell tapped -> show add dialog");
                     MenuAddButtonHelper.showAddDialog(((View) sRecycler).getContext());
-                    return false;
+                    // 2026-09-20 修复:原来 return false 放行 UP,MenuEditHelper 给
+                    // itemView 装的 onClick 会再弹一次 -> 一次点击叠两个一模一样的
+                    // PopupWindow。这里吞掉该 UP,只保留拦截器这一条触发路径。
+                    return true;
                 }
                 // In edit mode, a simple tap should NOT reach the item's onClick. Intercept it
                 // and route to our own ✕ / empty-space handling.
