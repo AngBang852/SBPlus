@@ -10,8 +10,8 @@ android {
         applicationId "com.sbplus.browser"
         minSdk 24
         targetSdk 34
-        versionCode 10
-        versionName "2.5.3"
+        versionCode 11
+        versionName "2.6.0"
 
         // 把版本号注入到普通类也能读到的位置。
         // 背景:MainHook 运行在**三星浏览器进程**里,加载不到模块自己的 BuildConfig,
