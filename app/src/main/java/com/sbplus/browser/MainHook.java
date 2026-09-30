@@ -2502,8 +2502,22 @@ private static final String[] RANDOM_UAS = new String[]{
                             // (Samsung then logs "onMenuKeyClicked: no Item"), restore defaults.
                             scheduleMenuSelfHeal(cl);
                             scheduleUserscriptAutoUpdate();
-                            loadRequireCacheFromDisk();
-                            loadResourceCacheFromDisk();
+                            // 2026-10-04 修复(主线程 IO):两处磁盘缓存加载移到后台线程。
+                            // 本回调挂在 SBrowserApplication.onCreate 上、运行在**主线程**,
+                            // 而这两个方法会 listFiles 后逐个 readFileText —— 脚本缓存目录
+                            // 可能有几十个文件、每份几十 KB 到 MB 级,全部串行读盘发生在
+                            // 浏览器冷启动的关键路径上,直接拖慢启动并埋 ANR 隐患。
+                            //
+                            // 安全性前提(已核对):两者写入的 requireCache/resourceCache
+                            // 都自带 synchronized 保护,且消费方(loadRequires 等)也走同一把锁,
+                            // 因此搬到后台不引入竞态;最坏情况是"注入时缓存尚未载入",
+                            // 此时按原有逻辑走网络拉取,行为与首次运行一致。
+                            SbExecutors.bg(new Runnable() {
+                                @Override public void run() {
+                                    try { loadRequireCacheFromDisk(); } catch (Throwable ignored) {}
+                                    try { loadResourceCacheFromDisk(); } catch (Throwable ignored) {}
+                                }
+                            });
                             // 启动后台脚本和定时脚本(延迟5秒等 WebView 初始化完成)
                             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
                                 @Override public void run() { startBackgroundScripts(); }
@@ -3546,10 +3560,42 @@ private static final String[] RANDOM_UAS = new String[]{
 
 
     private static void showCookieDialog(final android.app.Activity act) {
+        // 2026-10-04 修复(主线程 IO):开库枚举 host 移到后台线程。
+        // 原实现直接在构建对话框时同步调用 CookieHelper.listHostEntries(ctx) ——
+        // 那是一次 openDatabase + 全表 GROUP BY,在 Cookie 条数多(或库被宿主占用
+        // 导致等锁)时会明显卡住主线程。这里改为:后台取数据 → 回主线程构建 UI。
+        // 数据是纯 Java 对象(host 名与计数),不涉及 View,跨线程传递安全。
         try {
             final Context ctx = act;
-            // 一次开库拿到全部 host + 计数(旧实现是每个 host 各开一次库, 主线程 N+1)
-            final java.util.List<CookieHelper.HostEntry> entries = CookieHelper.listHostEntries(ctx);
+            SbExecutors.bg(new Runnable() {
+                @Override public void run() {
+                    final java.util.List<CookieHelper.HostEntry> entries;
+                    try {
+                        entries = CookieHelper.listHostEntries(ctx);
+                    } catch (Throwable t) {
+                        MainModule.logMsg("[SBPlus] listHostEntries(bg) error: " + t);
+                        return;
+                    }
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                        @Override public void run() {
+                            try {
+                                showCookieDialogWith(act, ctx, entries);
+                            } catch (Throwable t) {
+                                MainModule.logMsg("[SBPlus] showCookieDialog ui error: " + t);
+                            }
+                        }
+                    });
+                }
+            });
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] showCookieDialog error: " + t);
+        }
+    }
+
+    /** 用**已在后台取好**的 host 列表构建 Cookie 管理对话框(必须在主线程调用)。 */
+    private static void showCookieDialogWith(final android.app.Activity act, final Context ctx,
+                                             java.util.List<CookieHelper.HostEntry> entries) {
+        try {
             final java.util.Map<String,Integer> countMap = new java.util.LinkedHashMap<>();
             for (CookieHelper.HostEntry e : entries) countMap.put(e.host, e.count);
             final java.util.List<String> hosts = new java.util.ArrayList<>();
@@ -3840,22 +3886,44 @@ private static final String[] RANDOM_UAS = new String[]{
 
             final java.lang.Runnable reload = new java.lang.Runnable() {
                 @Override public void run() {
-                    list.removeAllViews();
-                    rows.clear();
-                    java.util.List<String[]> data = CookieHelper.readHostCookies(ctx, host);
-                    for (String[] r : data) {
-                        addCookieRow(ctx, list, rows, r[0], r[1],
-                                r.length > 2 && r[2] != null ? r[2] : "/",
-                                r.length > 3 && "1".equals(r[3]),
-                                r.length > 4 && "1".equals(r[4]));
-                    }
-                    if (data.isEmpty()) {
-                        android.widget.TextView empty = new android.widget.TextView(ctx);
-                        empty.setText(T("（该站没有 Cookie）", "(no cookies)"));
-                        empty.setPadding(pad, pad, pad, pad);
-                        list.addView(empty);
-                    }
-                    MainModule.logMsg("[SBPlus] cookie load host=" + host + " rows=" + data.size());
+                    // 2026-10-04 修复(主线程 IO):读库移到后台,UI 更新回主线程。
+                    // 原实现直接在(主线程的)刷新路径里调用 CookieHelper.readHostCookies
+                    // —— 那是一次 openDatabase + 全表查询;reload 还会在"保存后"、
+                    // "清空该站后"被调用,主线程反复开库在 Cookie 多时明显卡顿。
+                    final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                    SbExecutors.bg(new Runnable() {
+                        @Override public void run() {
+                            final java.util.List<String[]> data;
+                            try {
+                                data = CookieHelper.readHostCookies(ctx, host);
+                            } catch (Throwable t) {
+                                MainModule.logMsg("[SBPlus] readHostCookies(bg) error: " + t);
+                                return;
+                            }
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    try {
+                                        list.removeAllViews();
+                                        rows.clear();
+                                        for (String[] r : data) {
+                                            addCookieRow(ctx, list, rows, r[0], r[1],
+                                                    r.length > 2 && r[2] != null ? r[2] : "/",
+                                                    r.length > 3 && "1".equals(r[3]),
+                                                    r.length > 4 && "1".equals(r[4]));
+                                        }
+                                        if (data.isEmpty()) {
+                                            android.widget.TextView empty = new android.widget.TextView(ctx);
+                                            empty.setText(T("（该站没有 Cookie）", "(no cookies)"));
+                                            empty.setPadding(pad, pad, pad, pad);
+                                            list.addView(empty);
+                                        }
+                                    } catch (Throwable t) {
+                                        MainModule.logMsg("[SBPlus] reload ui error: " + t);
+                                    }
+                                }
+                            });
+                        }
+                    });
                 }
             };
             reload.run();
@@ -3942,10 +4010,39 @@ private static final String[] RANDOM_UAS = new String[]{
                                             " cookies for this site. This cannot be undone."))
                                     .setPositiveButton(T("清空", "Clear"), new android.content.DialogInterface.OnClickListener() {
                                         @Override public void onClick(android.content.DialogInterface d2, int w2) {
-                                            final int n = CookieHelper.clearHostAll(act, host);
-                                            toast(ctx, T("已清除 ", "Cleared ") + n + T(" 个 Cookie", " cookie(s)"));
-                                            MainModule.logMsg("[SBPlus] cookie cleared n=" + n + " host=" + host);
-                                            reload.run();
+                                            // 2026-10-04 修复(主线程 IO):删库移到后台。
+                                            // 原实现在对话框 onClick(主线程)里直接
+                                            // CookieHelper.clearHostAll —— 那是一次
+                                            // openDatabase + 逐行 delete,库大或宿主正持锁时
+                                            // 会阻塞 UI;而本类其它同类操作(clearAll/applyDiff)
+                                            // 都已开线程,唯独这条漏了。
+                                            // 完成后回主线程 toast 并刷新列表。
+                                            final android.os.Handler h =
+                                                    new android.os.Handler(android.os.Looper.getMainLooper());
+                                            SbExecutors.bg(new Runnable() {
+                                                @Override public void run() {
+                                                    final int n;
+                                                    try {
+                                                        n = CookieHelper.clearHostAll(act, host);
+                                                    } catch (Throwable t) {
+                                                        MainModule.logMsg("[SBPlus] clearHostAll(bg) error: " + t);
+                                                        return;
+                                                    }
+                                                    h.post(new Runnable() {
+                                                        @Override public void run() {
+                                                            try {
+                                                                toast(ctx, T("已清除 ", "Cleared ") + n
+                                                                        + T(" 个 Cookie", " cookie(s)"));
+                                                                MainModule.logMsg("[SBPlus] cookie cleared n="
+                                                                        + n + " host=" + host);
+                                                                reload.run();
+                                                            } catch (Throwable t) {
+                                                                MainModule.logMsg("[SBPlus] clear ui error: " + t);
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            });
                                         }
                                     })
                                     .setNegativeButton(T("取消", "Cancel"), null)
@@ -17219,16 +17316,44 @@ private static void showUaGroupDialog(final Context ctx) {
      * <p>复用导出用的书签树对话框 —— 同一套交互主人已经熟悉, 不另造轮子。
      */
     static void showBookmarkPickForSort(final android.app.Activity act) {
+        // 2026-10-04 修复(主线程 IO):读库移到后台。
+        // readBookmarkNodes() 内部会先把浏览器书签库**整库复制**到缓存目录再打开查询
+        // (copyFile),书签库大时这一步在主线程足以造成可感卡顿。buildBookmarkTree /
+        // markAllChecked / collectCheckedBookmarkIds 全是纯内存操作,跨线程安全;
+        // 对话框构建回主线程执行。
         try {
-            final BookmarkNode tree = buildBookmarkTree(readBookmarkNodes());
-            markAllChecked(tree);
-            java.util.List<Long> probe = new java.util.ArrayList<Long>();
-            collectCheckedBookmarkIds(tree, probe);
-            if (probe.isEmpty()) {
-                toastOnMain(T("没有可整理的书签", "No bookmarks to sort"));
-                return;
-            }
-            showBookmarkTreeDialogForSort(act, tree);
+            toastOnMain(T("正在读取书签…", "Loading bookmarks…"));
+            SbExecutors.bg(new Runnable() {
+                @Override public void run() {
+                    final BookmarkNode tree;
+                    final boolean empty;
+                    try {
+                        tree = buildBookmarkTree(readBookmarkNodes());
+                        markAllChecked(tree);
+                        java.util.List<Long> probe = new java.util.ArrayList<Long>();
+                        collectCheckedBookmarkIds(tree, probe);
+                        empty = probe.isEmpty();
+                    } catch (Throwable t) {
+                        MainModule.logMsg("[SBPlus] showBookmarkPickForSort bg error: " + t);
+                        toastOnMain(T("打开失败", "Failed to open"));
+                        return;
+                    }
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                        @Override public void run() {
+                            try {
+                                if (empty) {
+                                    toastOnMain(T("没有可整理的书签", "No bookmarks to sort"));
+                                    return;
+                                }
+                                showBookmarkTreeDialogForSort(act, tree);
+                            } catch (Throwable t) {
+                                MainModule.logMsg("[SBPlus] showBookmarkPickForSort ui error: " + t);
+                                toastOnMain(T("打开失败", "Failed to open"));
+                            }
+                        }
+                    });
+                }
+            });
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] showBookmarkPickForSort error: " + t);
             toastOnMain(T("打开失败", "Failed to open"));
@@ -18021,33 +18146,43 @@ private static void showUaGroupDialog(final Context ctx) {
     }
 
     /** 导出:只把勾选的节点序列化成 HTML。 */
-    private static void doExportSelected(BookmarkNode root) {
-        try {
-            StringBuilder sb = new StringBuilder();
-            sb.append("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n");
-            sb.append("<!-- This is an automatically generated file. -->\n");
-            sb.append("<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n");
-            sb.append("<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n");
-            sb.append("<DL><p>\n");
-            int cnt = appendCheckedHtml(sb, root, 0);
-            sb.append("</DL><p>\n");
-            java.io.File out = bookmarkExportFile();
-            // fos.close() 必须放 finally: 原实现写在 write 的下一行, 一旦 write
-            // 抛异常(磁盘满/权限)就永久泄漏一个 fd。
-            java.io.FileOutputStream fos = null;
-            try {
-                fos = new java.io.FileOutputStream(out);
-                fos.write(sb.toString().getBytes("UTF-8"));
-                fos.flush();
-            } finally {
-                if (fos != null) try { fos.close(); } catch (Throwable ignored) {}
+    private static void doExportSelected(final BookmarkNode root) {
+        // 2026-10-04 修复(主线程 IO):整棵书签树的 HTML 序列化 + 文件写入移到后台。
+        // 原实现全程在调用方线程(对话框按钮回调 = 主线程)执行:书签数千条时,
+        // 递归拼 HTML 与一次性写盘都会明显卡住 UI。appendCheckedHtml 只读节点树、
+        // 不触碰 View,故跨线程安全;toastOnMain 本身就会回主线程。
+        // 配套:先给一句即时反馈(理由同 doImportSelected)。
+        toastOnMain(T("正在导出,请稍候…", "Exporting, please wait…"));
+        SbExecutors.bg(new Runnable() {
+            @Override public void run() {
+                try {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n");
+                    sb.append("<!-- This is an automatically generated file. -->\n");
+                    sb.append("<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n");
+                    sb.append("<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n");
+                    sb.append("<DL><p>\n");
+                    int cnt = appendCheckedHtml(sb, root, 0);
+                    sb.append("</DL><p>\n");
+                    java.io.File out = bookmarkExportFile();
+                    // fos.close() 必须放 finally: 原实现写在 write 的下一行, 一旦 write
+                    // 抛异常(磁盘满/权限)就永久泄漏一个 fd。
+                    java.io.FileOutputStream fos = null;
+                    try {
+                        fos = new java.io.FileOutputStream(out);
+                        fos.write(sb.toString().getBytes("UTF-8"));
+                        fos.flush();
+                    } finally {
+                        if (fos != null) try { fos.close(); } catch (Throwable ignored) {}
+                    }
+                    toastOnMain(T("已导出 ", "Exported ") + cnt + T(" 个书签:", " bookmarks: ") + out.getAbsolutePath());
+                    MainModule.logMsg("[SBPlus] export selected: " + cnt + " -> " + out.getAbsolutePath());
+                } catch (Throwable t) {
+                    MainModule.logMsg("[SBPlus] doExportSelected error: " + t);
+                    toastOnMain(T("导出失败", "Export failed"));
+                }
             }
-            toastOnMain(T("已导出 ", "Exported ") + cnt + T(" 个书签:", " bookmarks: ") + out.getAbsolutePath());
-            MainModule.logMsg("[SBPlus] export selected: " + cnt + " -> " + out.getAbsolutePath());
-        } catch (Throwable t) {
-            MainModule.logMsg("[SBPlus] doExportSelected error: " + t);
-            toastOnMain(T("导出失败", "Export failed"));
-        }
+        });
     }
 
     /** 递归生成仅勾选节点的 HTML,返回计数。 */
@@ -18093,7 +18228,27 @@ private static void showUaGroupDialog(final Context ctx) {
      *       一整套重复书签。</li>
      * </ol>
      */
-    private static void doImportSelected(BookmarkNode root) {
+    private static void doImportSelected(final BookmarkNode root) {
+        // 2026-10-04 修复(主线程 IO):整条导入流程移到后台线程。
+        // 原实现全程在调用方线程(对话框按钮回调 = 主线程)执行,包含三件重活:
+        //   ① backupBookmarkDb() —— 整库(含 -wal)文件复制;
+        //   ② 全表 SELECT URL 做去重预载;
+        //   ③ 事务内递归插入整棵勾选树。
+        // 书签数千条时,这三步叠加足以触发宿主浏览器 ANR。insertCheckedTree 只操作
+        // db 与节点树、不触碰 View,故跨线程安全;所有 UI 反馈都走 toastOnMain。
+        //
+        // 配套:先给一句"正在导入"的即时反馈 —— 任务转到后台后对话框会立即关闭,
+        // 若不加提示,用户在完成 toast 出现前会以为点击没生效(完成提示在几秒后)。
+        toastOnMain(T("正在导入,请稍候…", "Importing, please wait…"));
+        SbExecutors.bg(new Runnable() {
+            @Override public void run() {
+                doImportSelectedBg(root);
+            }
+        });
+    }
+
+    /** 导入的实际执行体(在后台线程运行,不得触碰任何 View)。 */
+    private static void doImportSelectedBg(BookmarkNode root) {
         // 1) 先备份。备份失败就中止 —— 没有退路的破坏性写入不该执行。
         String backup = backupBookmarkDb();
         if (backup == null) {
