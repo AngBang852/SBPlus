@@ -48,7 +48,16 @@ build_*.txt
 
 # reference/test assets
 _ref/
-tests/
+# 2026-10-04:tests/ 从"整体忽略"改为"纳入版本控制"。
+# 原因:那里有唯一的红绿回归测试(cron-redgreen),整体忽略意味着
+# 改动没有测试兜底、换机器即丢、别人也看不到怎么测。
+# 但其中 cron-redgreen/CronUtils.java 是**主源码的副本**(为让测试能脱离
+# Android 模块单独 javac 而存在),副本会漂移,故单独忽略 —— 测试改为
+# 从主源码目录取该类(见 tests/cron-redgreen/README.md 的编译命令)。
+# 另:该目录下的 .class 编译产物一律忽略。
+tests/cron-redgreen/CronUtils.java
+tests/**/*.class
+tests/**/out/
 _*.ts
 # temp jar extract
 tmp_jar_extract/
