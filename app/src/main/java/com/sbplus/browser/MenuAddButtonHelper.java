@@ -110,6 +110,16 @@ public final class MenuAddButtonHelper {
             pop.setBackgroundDrawable(new GradientDrawable());
             pop.setOutsideTouchable(true);
             pop.setFocusable(true);
+            // 2026-10-04 修复(静态 PopupWindow 泄漏):弹窗消失时自动清引用。
+            // 原实现只在下次 show 时覆盖 sActivePopup,于是弹窗关闭后静态字段仍强引用
+            // pop 及整个面板 View 树(含宿主 context)直到再次打开 —— 常驻进程里
+            // 反复开关会持续累积。加 dismiss 自清即可,不影响 ✕ 与格子点击的原有路径
+            // (它们通过 sActivePopup.dismiss() 关闭,关闭后同样触发本回调)。
+            pop.setOnDismissListener(new android.widget.PopupWindow.OnDismissListener() {
+                @Override public void onDismiss() {
+                    if (sActivePopup == pop) sActivePopup = null;
+                }
+            });
 
             // Anchor it just above the menu sheet: show at the menu sheet's top-left,
             // offset upward by the panel height.

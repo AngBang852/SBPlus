@@ -419,7 +419,20 @@ public final class FontHelper {
                 }
             });
             b.setNegativeButton("关闭", null);
-            sCurrentDialog = b.show();
+            // 2026-10-04 修复(静态 Dialog 泄漏):持有引用本身是有意设计(见下方
+            // sCurrentDialog 的说明 —— 行点击需要 dismiss 旧框再重建),但**必须**在
+            // 对话框消失时把引用清掉。原实现只在 refreshList 里清,于是用户直接点
+            // "关闭"/返回键/点外部关闭时,静态字段仍强引用这个以 Activity 为 context 的
+            // AlertDialog → 连带整个 Activity 与视图树泄漏,直到下次打开列表才被覆盖。
+            final android.app.AlertDialog dlg = b.show();
+            dlg.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(android.content.DialogInterface d) {
+                    // 只在"当前引用就是本框"时清空:refreshList 会先清引用再建新框,
+                    // 若不判断,旧框的 dismiss 回调会把新框的引用误清掉。
+                    if (sCurrentDialog == dlg) sCurrentDialog = null;
+                }
+            });
+            sCurrentDialog = dlg;
         } catch (Throwable t) { XposedBridgeLog("openList err: " + t); }
     }
 

@@ -336,6 +336,16 @@ public final class ThemeColorHelper {
                     @Override public void onClick(android.content.DialogInterface d, int w) { d.dismiss(); }
                 })
                 .create();
+            // 2026-10-04 修复(静态 Dialog 泄漏):对话框消失时自动清引用。
+            // 持有引用是为消除叠加(见 sCurrentDialog 说明),但原实现只在下次打开时
+            // 覆盖,用户直接关闭/返回/点外部时静态字段仍强引用以 Activity 为 context
+            // 的 AlertDialog → 连带 Activity 与视图树泄漏。
+            final android.app.AlertDialog dlgRef = sCurrentDialog;
+            dlgRef.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(android.content.DialogInterface d) {
+                    if (sCurrentDialog == dlgRef) sCurrentDialog = null;   // 只清自己,不误清新框
+                }
+            });
             sCurrentDialog.show();
         } catch (Throwable t) { log("list: " + t); }
     }
@@ -448,6 +458,13 @@ public final class ThemeColorHelper {
                 })
                 .setNegativeButton("取消", null)
                 .create();
+            // 2026-10-04 修复(静态 Dialog 泄漏):同上,取色页消失时也自动清引用。
+            final android.app.AlertDialog pickerRef = sCurrentDialog;
+            pickerRef.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(android.content.DialogInterface d) {
+                    if (sCurrentDialog == pickerRef) sCurrentDialog = null;
+                }
+            });
             sCurrentDialog.show();
         } catch (Throwable t) { log("picker: " + t); }
     }
