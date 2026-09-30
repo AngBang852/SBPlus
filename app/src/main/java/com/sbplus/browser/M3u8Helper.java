@@ -45,6 +45,42 @@ final class M3u8Helper {
     }
 
     /**
+     * 判断播放列表是否**加密**(AES-128 / SAMPLE-AES)。
+     *
+     * <p>2026-10-04 新增(审查中等项):原 {@link #parseM3u8Ts} 会跳过所有 {@code #} 行,
+     * 其中就包括 {@code #EXT-X-KEY:METHOD=AES-128,URI="..."}。于是加密流的分片被当作
+     * **明文**下载,产出一个无法播放的文件 —— 用户只看到"下载完成",打开才发现是坏的,
+     * 且中间文件已删无法重试。这里提供检测,由调用方快速失败并明确告知原因。
+     *
+     * <p>判据:出现 {@code #EXT-X-KEY} 且 METHOD 不是 NONE。
+     * ({@code METHOD=NONE} 表示该段不加密,属合法情况。)
+     *
+     * @param mediaPlaylistText 媒体列表正文(master 列表不含 KEY 标签)
+     */
+    static boolean isEncryptedStream(String mediaPlaylistText) {
+        try {
+            if (mediaPlaylistText == null || mediaPlaylistText.isEmpty()) return false;
+            String upper = mediaPlaylistText.toUpperCase(java.util.Locale.ROOT);
+            int idx = upper.indexOf("#EXT-X-KEY");
+            if (idx < 0) return false;
+            // 取该标签所在行,检查 METHOD
+            int eol = upper.indexOf('\n', idx);
+            String line = (eol > 0) ? upper.substring(idx, eol) : upper.substring(idx);
+            int mi = line.indexOf("METHOD=");
+            if (mi < 0) return false;               // 无 METHOD 声明,不判定
+            String method = line.substring(mi + "METHOD=".length()).trim();
+            int comma = method.indexOf(',');
+            if (comma > 0) method = method.substring(0, comma);
+            method = method.trim();
+            // METHOD=NONE 表示不加密(合法);其余(AES-128/SAMPLE-AES/…)都视为加密
+            return !method.isEmpty() && !method.startsWith("NONE");
+        } catch (Throwable t) {
+            // 判定失败时保守返回 false —— 不因检测本身出错而阻断下载
+            return false;
+        }
+    }
+
+    /**
      * 解析 m3u8 内容,返回分片绝对 URL 列表;若是 variant(master)列表则返回
      * 其指向的子播放列表 URL(调用方需再取一次内容)。
      *

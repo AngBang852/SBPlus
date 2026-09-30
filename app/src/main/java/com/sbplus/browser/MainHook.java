@@ -22005,6 +22005,17 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 toastShort(T("直播流不支持下载", "Live streams cannot be downloaded"));
                 return false;
             }
+            // 2.6 加密流保护(审查中等项):AES-128/SAMPLE-AES 的分片需要密钥解密,
+            //     本模块不具备解密能力。原实现会把加密分片当**明文**下载,产出一个
+            //     无法播放的文件并标记"下载完成" —— 用户打开才发现是坏的,而中间文件
+            //     已删、无从重试。这里快速失败并明确告知原因,不产出坏文件。
+            if (M3u8Helper.isEncryptedStream(mediaText)) {
+                MainModule.logMsg("[SBPlus] m3u8: encrypted stream (AES-128/SAMPLE-AES), refuse: " + m3u8Url);
+                failM3u8Task(task, T("该流已加密(AES-128),当前版本不支持解密下载",
+                        "This stream is encrypted (AES-128); decryption is not supported"));
+                toastShort(T("该流已加密,暂不支持下载", "Encrypted stream, not supported yet"));
+                return false;
+            }
             MainModule.logMsg("[SBPlus] m3u8 segments: " + segs.size());
 
             // 3. 高并发下载分片 -> 顺序拼接 .ts

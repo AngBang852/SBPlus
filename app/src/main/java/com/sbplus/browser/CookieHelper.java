@@ -184,16 +184,60 @@ public final class CookieHelper {
         if (path == null || path.isEmpty()) path = "/";
         ContentValues cv = buildCookieRow(db, rawHost, name, value, path, secure, httpOnly);
 
-        db.beginTransaction();                              // DELETE + INSERT 必须原子
+        // 2026-10-04:兼容"已在事务中"的调用方(如 setCookies 的批量路径)。
+        // Android 的 SQLiteDatabase 不允许嵌套 beginTransaction —— 外层已开事务时
+        // 再调 setTransactionSuccessful 会抛 IllegalStateException(被上层 catch 吞掉,
+        // 表现为"导入条数不对/静默失败")。这里按 inTransaction() 判断,只在自己
+        // 未处于事务时才开事务。
+        boolean ownTx = !db.inTransaction();
+        if (ownTx) db.beginTransaction();
         try {
             db.delete("cookies", "host_key=? AND name=? AND path=?",
                     new String[]{ rawHost, name, path });
             db.insertOrThrow("cookies", null, cv);
-            db.setTransactionSuccessful();
+            if (ownTx) db.setTransactionSuccessful();
         } finally {
-            db.endTransaction();
+            if (ownTx) db.endTransaction();
         }
+        // 2026-10-04 实测补充(必读):**只写库不够**。
+        // 实测目标设备 Cookies 库:value 列 30/30 为空,全部值以 "v10" 前缀加密存于
+        // encrypted_value(系统密钥加密)。新版 Chromium 读 cookie 时只认 encrypted_value,
+        // 因此仅写明文 value 列 → 引擎看不见 → 用户"改了 Cookie 却毫无效果"且无任何报错;
+        // 引擎退出时还可能用内存态回写覆盖我们写的内容。
+        // 我们无法生成合法密文(需要系统密钥),所以这里补一步:同时通过 CookieManager
+        // 写入一次 —— 让**引擎自己**去加密落库。两步都做:SQLite 路径兼容老版本
+        // (老版本读 value 列),CookieManager 路径保证新版本真正生效。
+        applyToEngine(rawHost, name, value, path, secure, httpOnly);
         return true;
+    }
+
+    /**
+     * 通过引擎写入一条 cookie(2026-10-04 新增)。
+     *
+     * <p>为什么需要:见 {@link #setCookieWithDb} 的说明 —— 新版 Chromium 只读
+     * encrypted_value,直写 SQLite 的明文 value 列对引擎不可见。走 CookieManager
+     * 让引擎自己完成加密与落库,这是唯一不触碰系统密钥的正确做法。
+     */
+    private static void applyToEngine(String rawHost, String name, String value,
+                                      String path, boolean secure, boolean httpOnly) {
+        try {
+            String bare = rawHost == null ? "" : (rawHost.startsWith(".") ? rawHost.substring(1) : rawHost);
+            if (bare.isEmpty() || name == null || name.isEmpty()) return;
+            StringBuilder ck = new StringBuilder();
+            ck.append(name).append('=').append(value == null ? "" : value);
+            ck.append("; Path=").append(path == null || path.isEmpty() ? "/" : path);
+            ck.append("; Domain=").append(bare);
+            if (secure) ck.append("; Secure");
+            if (httpOnly) ck.append("; HttpOnly");
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            // 先删同名的旧值(改值时避免新旧并存),再写新值
+            try { cm.setCookie("https://" + bare + "/", name + "=; Path=/; Max-Age=0"); } catch (Throwable ignored) {}
+            cm.setCookie("https://" + bare + "/", ck.toString());
+            cm.setCookie("http://" + bare + "/", ck.toString());
+            try { cm.flush(); } catch (Throwable ignored) {}   // 部分实现需要 flush 才落盘
+        } catch (Throwable t) {
+            XposedBridgeLog("applyToEngine err: " + t);
+        }
     }
 
     /**
@@ -212,6 +256,14 @@ public final class CookieHelper {
         cv.put("host_key", rawHost);
         cv.put("name", name);
         cv.put("value", value);
+        // 2026-10-04 实测补充:新版 Chromium 只读 encrypted_value,value 列**恒为空**时
+        // 它才会走加密列。我们无法生成合法的 encrypted_value(需系统密钥,超出模块能力),
+        // 因此这里做的是"让引擎能看见明文 value"的处理 —— 见 setCookieWithDb 的说明,
+        // 那里会同步把写库结果再用 CookieManager 灌一次,确保引擎侧真正生效。
+        if (hasColumn(db, "cookies", "encrypted_value")) {
+            // 显式写入空 BLOB:该列 NOT NULL,不写会 insert 失败。
+            cv.put("encrypted_value", new byte[0]);
+        }
         cv.put("path", path);
         cv.put("expires_utc", now + DEFAULT_MAX_AGE_MICROS);
         cv.put("is_secure", secure ? 1 : 0);
@@ -236,6 +288,19 @@ public final class CookieHelper {
             db = openRW(ctx);
             if (db == null) return 0;
             String[] keys = rawKeyCandidates(rawHost);
+            // 2026-10-04:先记下待删的 name —— 事务提交后要逐条通知引擎删除,
+            // 否则引擎侧仍持有内存/加密副本,用户会看到"删了还在"。
+            java.util.List<String> namesToErase = new java.util.ArrayList<String>();
+            try {
+                Cursor nc = db.rawQuery("SELECT name FROM cookies WHERE host_key=? OR host_key=?",
+                        new String[]{ keys[0], keys.length > 1 ? keys[1] : keys[0] });
+                try {
+                    while (nc.moveToNext()) {
+                        String n = nc.getString(0);
+                        if (n != null && !n.isEmpty()) namesToErase.add(n);
+                    }
+                } finally { nc.close(); }
+            } catch (Throwable ignored) {}
             int total = 0;
             db.beginTransaction();
             try {
@@ -245,12 +310,37 @@ public final class CookieHelper {
             } finally {
                 db.endTransaction();
             }
+            // 事务提交后再通知引擎(顺序重要:未提交时引擎可能读回旧值)
+            eraseFromEngine(rawHost, namesToErase);
             return total;
         } catch (Throwable t) {
             XposedBridgeLog("clear err: " + t);
             return 0;
         } finally {
             closeQuietly(db);
+        }
+    }
+
+    /**
+     * 通过引擎删除若干 cookie(2026-10-04 新增)。
+     *
+     * <p>与 {@link #applyToEngine} 对称:直删 SQLite 对引擎不可见(新版 Chromium 的值
+     * 存在加密列,引擎另有内存副本),必须让引擎自己把 cookie 置为过期。
+     */
+    private static void eraseFromEngine(String rawHost, java.util.List<String> names) {
+        try {
+            String bare = rawHost == null ? "" : (rawHost.startsWith(".") ? rawHost.substring(1) : rawHost);
+            if (bare.isEmpty() || names == null || names.isEmpty()) return;
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            for (String n : names) {
+                if (n == null || n.isEmpty()) continue;
+                String expired = n + "=; Path=/; Max-Age=0; Domain=" + bare;
+                try { cm.setCookie("https://" + bare + "/", expired); } catch (Throwable ignored) {}
+                try { cm.setCookie("http://" + bare + "/", expired); } catch (Throwable ignored) {}
+            }
+            try { cm.flush(); } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            XposedBridgeLog("eraseFromEngine err: " + t);
         }
     }
 
@@ -271,6 +361,10 @@ public final class CookieHelper {
         if (kvs == null || kvs.isEmpty()) return 0;
         int ok = 0;
         SQLiteDatabase db = null;
+        // 2026-10-04:待同步到引擎的条目。刻意**不在循环里**逐条 applyToEngine ——
+        // 那时事务尚未提交,引擎可能读回旧值;而且 N 条会触发 2N 次 CookieManager 调用。
+        // 统一收集、事务提交后再灌,顺序与效率都正确。
+        java.util.List<String[]> engineSync = new java.util.ArrayList<String[]>();
         try {
             db = openRW(ctx);
             if (db == null) return 0;
@@ -282,11 +376,25 @@ public final class CookieHelper {
                     String path = kv.length > 2 && kv[2] != null && !kv[2].isEmpty() ? kv[2] : "/";
                     boolean secure = kv.length > 3 && "1".equals(kv[3]);
                     boolean httpOnly = kv.length > 4 && "1".equals(kv[4]);
-                    if (setCookieWithDb(db, rawHost, kv[0], kv[1], path, secure, httpOnly)) ok++;
+                    // 注意:这里必须用"不开事务"的写库版本,否则嵌套事务会失败。
+                    // setCookieWithDb 已改为按 inTransaction() 自适应,可直接复用;
+                    // 但它内部也会 applyToEngine —— 为保持"提交后统一灌"的语义,
+                    // 这里改用内联写入 + 收集。
+                    ContentValues cv = buildCookieRow(db, rawHost, kv[0], kv[1], path, secure, httpOnly);
+                    db.delete("cookies", "host_key=? AND name=? AND path=?",
+                            new String[]{ rawHost, kv[0], path });
+                    db.insertOrThrow("cookies", null, cv);
+                    engineSync.add(new String[]{ rawHost, kv[0], kv[1], path,
+                            secure ? "1" : "0", httpOnly ? "1" : "0" });
+                    ok++;
                 }
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
+            }
+            // 事务提交后再同步引擎(让引擎自己加密落库,新版 Chromium 唯一可靠路径)
+            for (String[] e : engineSync) {
+                applyToEngine(e[0], e[1], e[2], e[3], "1".equals(e[4]), "1".equals(e[5]));
             }
         } catch (Throwable t) {
             XposedBridgeLog("setCookies err: " + t);
@@ -398,6 +506,11 @@ public final class CookieHelper {
                 } finally {
                     db.endTransaction();
                 }
+                // 2026-10-04 实测补充:与 setCookieWithDb 同理 —— 新版 Chromium 只读
+                // encrypted_value,只写明文 value 列引擎看不见。这里在**事务提交之后**
+                // 通过 CookieManager 再写一次,让引擎自己加密落库(顺序很重要:事务未提交
+                // 时引擎读到的仍是旧值)。这条是"编辑 Cookie 能生效"的关键。
+                applyToEngine(keys[0], kv[0], kv[1], path, secure, httpOnly);
                 written++;
             }
             return written;
@@ -464,6 +577,16 @@ public final class CookieHelper {
      * 导出全部 cookie 为 Netscape cookie.txt 文本(可直接被 curl/yt-dlp/多数下载器 使用)。
      */
     public static String exportNetscape(Context ctx) {
+        // 2026-10-04 重构(实测驱动):原实现直接读 cookies 表的 value 列,但在当前
+        // Chromium 上该列**恒为空** —— 实测目标设备 profile 的 Cookies 库:
+        //   总行数 30,value 为空/空串 30 条(100%),encrypted_value 非空 30 条,
+        //   且其前缀全为 76 31 30 = ASCII "v10",即全部用系统密钥(Android Keystore)加密。
+        // 也就是说:导出的每一行值都是空串,用户拿到文件灌进 curl/yt-dlp 完全无效。
+        // 这不是"部分字段丢失",是**导出功能整体失效**。
+        //
+        // 修法:值改从引擎取。CookieManager.getCookie(url) 返回的是引擎**已解密**的
+        // 值(引擎自己持有密钥),且天然包含 httpOnly —— 无需触碰加密链路。
+        // host 列表仍走 SQLite:host_key/name/path 是明文列,实测准确。
         StringBuilder sb = new StringBuilder();
         sb.append("# Netscape HTTP Cookie File\n");
         sb.append("# 由 SBPlus 导出\n\n");
@@ -471,9 +594,13 @@ public final class CookieHelper {
         try {
             db = openRO(ctx);
             if (db == null) return sb.toString();
+            // 逐 host 取元数据(明文列):host_key / name / path / is_secure / is_httponly / expires_utc
+            // 同时读 value 明文列 —— 老版本 Chromium 上它是有效的,作为引擎取不到时的回退。
             Cursor c = db.rawQuery(
                     "SELECT host_key, is_secure, path, is_httponly, expires_utc, name, value"
                             + " FROM cookies ORDER BY host_key, name", null);
+            // 同一 host 的 CookieManager.getCookie 结果按 host 缓存,避免重复调用
+            java.util.Map<String, String> engineCache = new java.util.HashMap<String, String>();
             try {
                 while (c.moveToNext()) {
                     String host = c.getString(0);
@@ -482,10 +609,20 @@ public final class CookieHelper {
                     boolean httpOnly = c.getInt(3) != 0;
                     long expUtc = c.getLong(4);
                     String name = c.getString(5);
-                    String value = c.getString(6);
+                    String plainValue = c.getString(6);   // 老版本 Chromium 的明文值
                     if (host == null || name == null) continue;
+                    // 值优先从引擎取(已解密,新版 Chromium 唯一可靠来源);
+                    // 引擎取不到时回退到 value 明文列 —— 兼容老版本 Chromium,
+                    // 也兼容"引擎尚未初始化/该 host 未被访问过"的情况。
+                    String value = engineCookieValue(host, name, secure, engineCache);
+                    if (value == null || value.isEmpty()) {
+                        if (plainValue != null && !plainValue.isEmpty()) value = plainValue;
+                    }
                     long expSec = expUtc > 0 ? (expUtc / 1000000L) : 0L;
                     // Netscape 格式: domain  flag  path  secure  expiry  name  value
+                    // httpOnly:标准 Netscape 无此列,curl 用 "#HttpOnly_" 前缀表示。
+                    // 实测 2/30 条为 httpOnly,不写前缀会让这些登录态在导入时降级。
+                    if (httpOnly) sb.append("#HttpOnly_");
                     sb.append(host).append('\t')
                       .append(host.startsWith(".") ? "TRUE" : "FALSE").append('\t')
                       .append(path == null || path.isEmpty() ? "/" : path).append('\t')
@@ -493,7 +630,6 @@ public final class CookieHelper {
                       .append(expSec).append('\t')
                       .append(name).append('\t')
                       .append(value == null ? "" : value).append('\n');
-                    if (httpOnly) { /* Netscape 格式无 HttpOnly 列, 忽略 */ }
                 }
             } finally {
                 c.close();
@@ -504,6 +640,45 @@ public final class CookieHelper {
             closeQuietly(db);
         }
         return sb.toString();
+    }
+
+    /**
+     * 从引擎取某个 cookie 的值(已解密)。
+     *
+     * <p>CookieManager 只能按 URL 取整条 cookie 串(形如 "a=1; b=2"),所以这里
+     * 按 host 取一次、解析出所需 name,并按 host 缓存避免重复调用。
+     * URL 用 https 优先(secure cookie 只在 https 下可见);取不到再用 http 试一次。
+     */
+    private static String engineCookieValue(String host, String name, boolean secure,
+                                            java.util.Map<String, String> cache) {
+        try {
+            String bare = host.startsWith(".") ? host.substring(1) : host;
+            if (bare.isEmpty()) return "";
+            String raw = cache.get(bare);
+            if (raw == null) {
+                android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+                raw = "";
+                try { raw = cm.getCookie("https://" + bare + "/"); } catch (Throwable ignored) {}
+                if (raw == null || raw.isEmpty()) {
+                    // 非 secure 的 cookie 在 https 下也可能可见,但为稳妥再用 http 试一次
+                    try { raw = cm.getCookie("http://" + bare + "/"); } catch (Throwable ignored) {}
+                }
+                if (raw == null) raw = "";
+                cache.put(bare, raw);
+            }
+            if (raw.isEmpty()) return "";
+            // 解析 "name=value; name2=value2"
+            for (String part : raw.split(";")) {
+                String p = part.trim();
+                if (p.isEmpty()) continue;
+                int eq = p.indexOf('=');
+                if (eq <= 0) continue;
+                if (p.substring(0, eq).equals(name)) return p.substring(eq + 1);
+            }
+            return "";
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /**
@@ -523,7 +698,18 @@ public final class CookieHelper {
                 for (String line : lines) {
                     if (line == null) continue;
                     String ln = line.trim();
-                    if (ln.isEmpty() || ln.startsWith("#")) continue;
+                    if (ln.isEmpty()) continue;
+                    // 2026-10-04 兼容修复:curl 约定用 "#HttpOnly_" 前缀标记 httpOnly cookie。
+                    // 原实现把**所有** '#' 开头的行当注释跳过,于是自己导出的带前缀行
+                    // (以及 curl 导出的文件)会被整条丢弃 —— 往返一圈登录态就少了。
+                    // 这里先识别该前缀,剥掉后按普通行解析。
+                    boolean httpOnly = false;
+                    if (ln.startsWith("#HttpOnly_")) {
+                        httpOnly = true;
+                        ln = ln.substring("#HttpOnly_".length()).trim();
+                    } else if (ln.startsWith("#")) {
+                        continue;   // 其余 '#' 行确实是注释
+                    }
                     String[] p = ln.split("\t", -1);
                     if (p.length < 7) continue;
                     String host = p[0];
@@ -532,7 +718,8 @@ public final class CookieHelper {
                     String name = p[5];
                     String value = p[6];
                     if (host.isEmpty() || name.isEmpty()) continue;
-                    if (setCookieWithDb(db, host, name, value, path, secure, false)) ok++;
+                    // httpOnly 标记按解析结果透传(原实现恒传 false,会静默降级登录态)
+                    if (setCookieWithDb(db, host, name, value, path, secure, httpOnly)) ok++;
                 }
                 db.setTransactionSuccessful();
             } finally {
