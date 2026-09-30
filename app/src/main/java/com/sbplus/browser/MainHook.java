@@ -21000,15 +21000,29 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                             android.os.Environment.DIRECTORY_DOWNLOADS), "SBPlus");
                     String base = StrUtils.sanitizeFileName(task.name);
                     if (!base.isEmpty()) {
+                        // S20:中间产物带 taskId 前缀,清理必须按**同一命名规则**定位,
+                        // 否则取消任务时分片会留在磁盘上。同时兼容清理旧命名的残留
+                        // (修复前遗留的文件),两类都删,但都精确到本任务。
+                        String tid = (task.id == null || task.id.isEmpty()) ? "noTask" : task.id;
                         // 固定后缀的中间产物(精确名,无歧义)
-                        deleteIfExists(new java.io.File(dir, base + ".ts.merge"));
+                        deleteIfExists(new java.io.File(dir, mergeFileName(tid, base)));
+                        deleteIfExists(new java.io.File(dir, base + ".ts.merge"));      // 旧命名残留
                         deleteIfExists(new java.io.File(dir, base + ".video.m4s"));
                         deleteIfExists(new java.io.File(dir, base + ".audio.m4s"));
-                        // 分片:按序号递增删除,遇到不存在的序号即停止(分片必然连续)
+                        // 分片:按序号递增删除,遇到"两种命名都不存在"即停止(分片必然连续)
+                        //
+                        // 取舍说明:旧命名(base.part_N)不带 taskId,是"同名任务共享"的文件。
+                        // 升级后若恰好有一个旧任务仍在用旧命名分片,取消另一个同名新任务会
+                        // 连带删掉它 —— 这是旧命名本身的共享性决定的,无法事后区分归属。
+                        // 仍选择清理旧命名,是因为不清理会让修复前遗留的分片永久占盘;
+                        // 而"升级瞬间恰好有同名旧任务在跑"的窗口极窄,风险可接受。
                         for (int s = 0; s < MAX_PART_SCAN; s++) {
-                            java.io.File pf = new java.io.File(dir, base + ".part_" + s);
-                            if (!pf.exists()) break;
-                            deleteIfExists(pf);
+                            java.io.File neu = new java.io.File(dir, partFileName(tid, base, s));
+                            java.io.File old = new java.io.File(dir, base + ".part_" + s);
+                            boolean any = false;
+                            if (neu.exists()) { deleteIfExists(neu); any = true; }
+                            if (old.exists()) { deleteIfExists(old); any = true; }
+                            if (!any) break;
                         }
                     }
                 }
@@ -21031,6 +21045,45 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
     /** 判断 URL 是否 m3u8 播放列表。 */
 
     /** 下载 m3u8 视频为 MP4 (解析播放列表 -> 多线程下载分片 -> tsToMp4)。成功返回 true。 */
+    /**
+     * 分片文件命名(S20)。
+     *
+     * <p>2026-10-04 修复:原命名只用 {@code baseName}(如 {@code 视频.part_3}),
+     * 两个同名任务并发时**共用同一批分片文件** —— 一方取消会把另一方的分片全删,
+     * merge 还可能读到对方写了一半的文件,导致数据损坏与"取消 A 却弄坏 B"。
+     *
+     * <p>现在把 taskId 编进文件名: {@code <taskId>__<baseName>.part_N}。
+     * 每个任务的中间产物因此天然隔离,互不干扰。
+     *
+     * <p><b>续传兼容</b>:旧版本留下的分片仍是 {@code <baseName>.part_N}。
+     * {@link #resolvePartFile} 会先找带 taskId 的新名,找不到再退回旧名,
+     * 于是"升级前下了一半的任务"仍能续传,不会白费已下载的分片。
+     */
+    private static String partFileName(String taskId, String baseName, int seq) {
+        String safeId = (taskId == null || taskId.isEmpty()) ? "noTask" : taskId;
+        return safeId + "__" + baseName + ".part_" + seq;
+    }
+
+    /** 合并产物文件名(S20):同样带 taskId 前缀,避免同名任务互相覆盖。 */
+    private static String mergeFileName(String taskId, String baseName) {
+        String safeId = (taskId == null || taskId.isEmpty()) ? "noTask" : taskId;
+        return safeId + "__" + baseName + ".ts.merge";
+    }
+
+    /**
+     * 定位某序号的分片文件(S20):优先新命名(taskId 前缀),退回旧命名。
+     *
+     * <p>返回的 File 可能不存在 —— 调用方按 exists() 自行判断;
+     * 写入路径应使用 {@link #partFileName} 得到的新命名。
+     */
+    private static java.io.File resolvePartFile(java.io.File dir, String taskId, String baseName, int seq) {
+        java.io.File neu = new java.io.File(dir, partFileName(taskId, baseName, seq));
+        if (neu.exists()) return neu;
+        java.io.File old = new java.io.File(dir, baseName + ".part_" + seq);
+        if (old.exists()) return old;      // 兼容修复前遗留的分片(续传用)
+        return neu;                        // 都不存在 → 返回新命名(写入路径将创建它)
+    }
+
     /**
      * 高效下载分片列表并顺序拼接成单一文件.
      * 策略: 固定并发线程池 + 工作队列(每线程循环取序号) + 每分片独立落盘 + 按序拼接.
@@ -21071,7 +21124,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                     java.util.Collections.newSetFromMap(
                             new java.util.concurrent.ConcurrentHashMap<Integer, Boolean>());
             for (int s = 0; s < N; s++) {
-                java.io.File pf = new java.io.File(fTmp, fBase + ".part_" + s);
+                // S20:续传扫描用 resolvePartFile —— 优先新命名(taskId 前缀),
+                // 找不到再退回旧命名,使升级前下了一半的任务仍能续传。
+                java.io.File pf = resolvePartFile(fTmp, fTaskId, fBase, s);
                 if (pf.exists() && pf.length() > 0) {
                     skipped.add(Integer.valueOf(s));
                     long sz = pf.length();
@@ -21087,8 +21142,8 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 }
             }
             if (okCount.get() >= N) {
-                // 所有分片已存在 -> 直接拼接
-                java.io.File out = mergeParts(fTmp, fBase, N);
+                // 所有分片已存在 -> 直接拼接(S20:同样要带 taskId)
+                java.io.File out = mergeParts(fTmp, fTaskId, fBase, N);
                 if (out != null) { MainModule.logMsg("[SBPlus] seg all cached, merged"); return out; }
             }
 
@@ -21127,7 +21182,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                                 }
                                 try {
                                     if (b != null && b.length > 0) {
-                                        java.io.File pf = new java.io.File(fTmp, fBase + ".part_" + seq);
+                                        // S20:写入带 taskId 前缀的新命名,任务间天然隔离。
+                                        java.io.File pf = new java.io.File(fTmp,
+                                                partFileName(fTaskId, fBase, seq));
                                         java.io.FileOutputStream po = new java.io.FileOutputStream(pf);
                                         try { po.write(b); } finally { po.close(); }
                                         bytesDone.addAndGet(b.length);
@@ -21173,10 +21230,12 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
             // 取消: 删除所有已下载分片, 返回 null
             if (com.sbplus.browser.SbDownloadManager.isCancelled(fTaskId)) {
                 MainModule.logMsg("[SBPlus] seg cancelled, deleting parts");
+                // S20:只删**本任务**的分片(taskId 前缀)。旧命名的分片若存在也一并清掉,
+                // 但不会碰到其它任务的文件 —— 这正是加 taskId 要解决的问题。
                 for (int s = 0; s < N; s++) {
-                    try { new java.io.File(fTmp, fBase + ".part_" + s).delete(); } catch (Throwable ignored) {}
+                    try { new java.io.File(fTmp, partFileName(fTaskId, fBase, s)).delete(); } catch (Throwable ignored) {}
                 }
-                try { new java.io.File(fTmp, fBase + ".ts.merge").delete(); } catch (Throwable ignored) {}
+                try { new java.io.File(fTmp, mergeFileName(fTaskId, fBase)).delete(); } catch (Throwable ignored) {}
                 return null;
             }
 
@@ -21191,7 +21250,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
             int missing = 0;
             try {
                 for (int s = 0; s < N; s++) {
-                    if (!new java.io.File(fTmp, fBase + ".part_" + s).exists()) missing++;
+                    // S20:用 resolvePartFile —— 新命名与旧命名都算数,避免把
+                    // "升级前已下好的旧命名分片"误判为缺失而白白重下。
+                    if (!resolvePartFile(fTmp, fTaskId, fBase, s).exists()) missing++;
                 }
             } catch (Throwable ignored) {}
             if (missing > 0) {
@@ -21216,7 +21277,7 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
             }
 
             // 按序拼接
-            java.io.File out = mergeParts(fTmp, fBase, N);
+            java.io.File out = mergeParts(fTmp, fTaskId, fBase, N);
             return out;
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] downloadSegmentsHighConcurrent error: " + t);
@@ -21225,13 +21286,15 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
     }
 
     /** 按序拼接 .part_ 文件为单个 .ts.merge 文件. */
-    private static java.io.File mergeParts(java.io.File fTmp, String fBase, int N) {
+    private static java.io.File mergeParts(java.io.File fTmp, String taskId, String fBase, int N) {
         try {
-            java.io.File out = new java.io.File(fTmp, fBase + ".ts.merge");
+            // S20:输出用带 taskId 的新命名,避免同名任务互相覆盖。
+            java.io.File out = new java.io.File(fTmp, mergeFileName(taskId, fBase));
             java.io.FileOutputStream fos = new java.io.FileOutputStream(out);
             try {
                 for (int seq = 0; seq < N; seq++) {
-                    java.io.File pf = new java.io.File(fTmp, fBase + ".part_" + seq);
+                    // S20:读取用 resolvePartFile —— 新命名优先、旧命名兜底(续传兼容)。
+                    java.io.File pf = resolvePartFile(fTmp, taskId, fBase, seq);
                     if (pf.exists()) {
                         // try-with-resources + read() != -1:
                         //   ① 原实现 in.close() 不在 finally 里,read 抛 IOException 时
