@@ -20277,9 +20277,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                     ckVal = jo.optString("ck", "");
                 } catch (Throwable ignored) {}
                 if (ckVal != null && !ckVal.isEmpty() && ckHost != null) {
-                    String host0 = ckHost;
-                    int d0 = host0.lastIndexOf(".", host0.lastIndexOf(".") - 1);
-                    String suffix = (d0 > 0) ? host0.substring(d0 + 1) : host0;
+                    // S9:用注册域判定,不再手工取末两段(对 co.jp 等会取错)。
+                    String suffix = registrableDomain(ckHost);
+                    if (suffix == null || suffix.isEmpty()) suffix = ckHost;
                     sSniffCkHost = suffix;
                     sSniffCkValue = ckVal;
                     MainModule.logMsg("[SBPlus] sniff cookie saved for *" + suffix + " len=" + ckVal.length());
@@ -25211,7 +25211,13 @@ private static boolean showMediaDialog(String json) {
         // 站点 CDN 域也要带页面 cookie(phncdn 要 pornhub.com 的 cookie 才回 200)
         try {
             String ck = siteCore(k), tg = siteCore(h);
-            if (!ck.isEmpty() && ck.equals(tg)) return true;
+            // S9:主体相同还须**公网后缀也相同** —— 否则 a.com 与 a.net 会被误判同站,
+            // 又把一个站点的凭据发给另一个站点。注册域判定已挡住 co.jp 这类多级后缀误配,
+            // 这里补最后一道:比较两边的完整注册域。
+            if (!ck.isEmpty() && ck.equals(tg)) {
+                String rk = registrableDomain(k), rh = registrableDomain(h);
+                if (rk != null && !rk.isEmpty() && rk.equals(rh)) return true;
+            }
         } catch (Throwable ignored) {}
         return false;
     }
@@ -25238,8 +25244,9 @@ private static boolean showMediaDialog(String json) {
             if (host == null || host.isEmpty()) return;
             String ck = android.webkit.CookieManager.getInstance().getCookie(url);
             if (ck == null || ck.isEmpty()) return;
-            int d0 = host.lastIndexOf(".", host.lastIndexOf(".") - 1);
-            String suffix = (d0 > 0) ? host.substring(d0 + 1) : host;
+            // S9:与 20283 处同一判据,统一用注册域(不再手工取末两段)。
+            String suffix = registrableDomain(host);
+            if (suffix == null || suffix.isEmpty()) suffix = host;
             sSniffCkHost = suffix;
             sSniffCkValue = ck;
             MainModule.logMsg("[SBPlus] sniff cookie preloaded for *" + suffix + " len=" + ck.length());
@@ -25486,14 +25493,96 @@ private static boolean showMediaDialog(String json) {
         }
     }
 
-    /** 站点核心词:去常见公网后缀后取主体(com/org/net/cn/tv/co 等)。 */
+    /**
+     * 多级公网后缀表(S9)。
+     *
+     * <p>为什么需要:原先三处都用「手工取末两段」算站点后缀
+     * ({@code host.lastIndexOf(".", host.lastIndexOf(".")-1)})，对 {@code co.jp} /
+     * {@code com.cn} / {@code co.kr} 这类**二级后缀**会取到 {@code co.jp} 而不是
+     * {@code xxx.co.jp};随后 {@link #siteCore} 又把它缩成 {@code co} —— 结果是
+     * {@code a.co.jp} 与 {@code b.co.jp} 被判为同一站点,A 站的登录 Cookie 会被注入
+     * 发往 B 站的媒体请求(既是凭据泄露,也会让下载请求带上错误凭据被 403)。
+     *
+     * <p>这里只做**保守的**多级后缀识别:命中表内的后缀时多取一段。表不追求完整
+     * (完整表需要 PSL 数据文件),但覆盖了常见的国别二级域与主流 CDN 后缀;
+     * 未命中的域名退回"末两段"这一原有行为,不会比修复前更差。
+     */
+    private static final java.util.Set<String> MULTI_LEVEL_SUFFIXES =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    // 亚太
+                    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "ad.jp", "ed.jp", "gr.jp", "lg.jp",
+                    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn", "bj.cn", "sh.cn",
+                    "co.kr", "or.kr", "ne.kr", "re.kr", "pe.kr", "go.kr", "ac.kr",
+                    "com.tw", "org.tw", "net.tw", "edu.tw", "gov.tw", "idv.tw",
+                    "com.hk", "org.hk", "net.hk", "edu.hk", "gov.hk", "idv.hk",
+                    "com.sg", "org.sg", "net.sg", "edu.sg", "gov.sg",
+                    "com.my", "org.my", "net.my", "edu.my", "gov.my",
+                    "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in",
+                    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+                    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz", "geek.nz", "school.nz",
+                    "co.th", "or.th", "in.th", "go.th", "ac.th",
+                    "com.vn", "net.vn", "org.vn", "edu.vn", "gov.vn",
+                    "com.ph", "net.ph", "org.ph", "edu.ph", "gov.ph",
+                    "co.id", "or.id", "web.id", "ac.id", "go.id", "sch.id",
+                    "com.pk", "net.pk", "org.pk", "edu.pk", "gov.pk",
+                    // 欧洲 / 其他
+                    "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "ac.uk", "gov.uk",
+                    "com.br", "net.br", "org.br", "gov.br", "edu.br",
+                    "com.mx", "net.mx", "org.mx", "edu.mx", "gob.mx",
+                    "com.ar", "net.ar", "org.ar", "edu.ar", "gob.ar",
+                    "co.za", "org.za", "net.za", "gov.za", "ac.za",
+                    "com.tr", "net.tr", "org.tr", "edu.tr", "gov.tr",
+                    "com.ru", "net.ru", "org.ru", "msk.ru", "spb.ru",
+                    "com.ua", "net.ua", "org.ua", "edu.ua", "gov.ua",
+                    "com.pl", "net.pl", "org.pl", "edu.pl", "gov.pl",
+                    "co.il", "org.il", "net.il", "ac.il", "gov.il",
+                    "com.sa", "net.sa", "org.sa", "edu.sa", "gov.sa",
+                    "com.eg", "net.eg", "org.eg", "edu.eg", "gov.eg"));
+
+    /**
+     * 取注册域(S9):返回 {@code xxx.co.jp} 这种"站点本身"的域名。
+     *
+     * <p>规则:先看末两段是否在 {@link #MULTI_LEVEL_SUFFIXES} 内 —— 是则取末三段,
+     * 否则取末两段。单段 host(如 localhost)原样返回。
+     */
+    private static String registrableDomain(String host) {
+        try {
+            if (host == null) return "";
+            String h = host.toLowerCase(java.util.Locale.US).trim();
+            // 去掉端口与末尾点(URL.getHost 通常已去端口,这里兜一层)
+            int colon = h.indexOf(':');
+            if (colon >= 0) h = h.substring(0, colon);
+            while (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+            if (h.isEmpty()) return "";
+            String[] p = h.split("\\.");
+            if (p.length <= 1) return h;
+            String last2 = p[p.length - 2] + "." + p[p.length - 1];
+            if (MULTI_LEVEL_SUFFIXES.contains(last2)) {
+                return p.length >= 3 ? p[p.length - 3] + "." + last2 : last2;
+            }
+            return last2;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * 站点核心词:基于**注册域**取主体(S9 修复)。
+     *
+     * <p>原实现直接取倒数第二段,于是 {@code www.xxx.co.jp} 与 {@code a.xxx.co.jp}
+     * 都得到 {@code co} —— 所有 {@code *.co.jp} 站点被判为同一站点。
+     * 改为先算注册域(见 {@link #registrableDomain})再取主体:
+     * {@code www.xxx.co.jp} → 注册域 {@code xxx.co.jp} → 主体 {@code xxx},
+     * 不同站点之间不再互相匹配。
+     */
     private static String siteCore(String host) {
         try {
-            String h = host.toLowerCase(java.util.Locale.US);
-            String[] p = h.split("\\.");
-            // 取倒数第二段(最后一段是公网后缀)
+            String reg = registrableDomain(host);
+            if (reg == null || reg.isEmpty()) return "";
+            String[] p = reg.split("\\.");
+            // 注册域的最后一段是公网后缀(com/jp/cn...),主体是它前面那一段
             if (p.length >= 2) return p[p.length - 2];
-            return h;
+            return reg;
         } catch (Throwable t) {
             return "";
         }
