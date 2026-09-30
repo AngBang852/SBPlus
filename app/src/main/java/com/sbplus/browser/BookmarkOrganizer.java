@@ -297,11 +297,19 @@ public final class BookmarkOrganizer {
         List<DupGroup> out = new ArrayList<DupGroup>();
         Cursor c = null;
         try {
-            // 找出出现多次的 URL
+            // 2026-10-04 两处修复:
+            // ① DELETED 口径统一 —— 本文件其它查询用 (DELETED IS NULL OR DELETED=0),
+            //    这里原用 DELETED=0。SQL 三值逻辑下 NULL=0 结果为 NULL(非真),于是
+            //    **DELETED 为 NULL 的存量行会被静默漏掉**,去重对这些书签不生效。
+            //    统一为超集写法(不会多选,只会覆盖原口径漏掉的行)。
+            // ② URL 大小写 —— 本方法 javadoc 明确承诺"不区分大小写",但 SQLite 默认
+            //    BINARY 排序下 GROUP BY URL / URL=? 都是区分大小写的,承诺与实现相反:
+            //    仅大小写不同的重复书签永远查不出来。改用 LOWER(URL) 兑现承诺。
             c = db.rawQuery(
-                    "SELECT URL, COUNT(*) AS n FROM BOOKMARKS "
-                    + "WHERE FOLDER=0 AND DELETED=0 AND URL IS NOT NULL AND URL<>'' "
-                    + "GROUP BY URL HAVING n>1 ORDER BY n DESC LIMIT ?",
+                    "SELECT LOWER(URL) AS lu, COUNT(*) AS n FROM BOOKMARKS "
+                    + "WHERE FOLDER=0 AND (DELETED IS NULL OR DELETED=0)"
+                    + " AND URL IS NOT NULL AND URL<>'' "
+                    + "GROUP BY lu HAVING n>1 ORDER BY n DESC LIMIT ?",
                     new String[]{ String.valueOf(Math.max(1, maxGroups)) });
             List<String> urls = new ArrayList<String>();
             while (c.moveToNext()) urls.add(c.getString(0));
@@ -314,7 +322,8 @@ public final class BookmarkOrganizer {
                 try {
                     d = db.rawQuery(
                             "SELECT _ID, TITLE, COALESCE(CREATED,0), PARENT FROM BOOKMARKS "
-                            + "WHERE FOLDER=0 AND DELETED=0 AND URL=?",
+                            + "WHERE FOLDER=0 AND (DELETED IS NULL OR DELETED=0)"
+                            + " AND LOWER(URL)=?",
                             new String[]{ url });
                     while (d.moveToNext()) {
                         long parent = d.getLong(3);

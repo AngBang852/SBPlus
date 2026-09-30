@@ -69,6 +69,21 @@ public final class MenuReorderHelper {
     public static void cacheRefs(Object handler, Object recycler, Object adapter,
                                  List<MenuItem> primary, List<MenuItem> secondary,
                                  List<MenuItem> removed) {
+        // 2026-10-04 修复:换新菜单时必须把上一轮的宿主 View 引用一并清掉。
+        // sRemoveMarks 是静态 Map<View,View>,值是挂在宿主菜单项上的「✕ 删除标记」。
+        // 原实现只重置了 sItems/sDragView,漏了它 —— 菜单 sheet 每次打开都会重建,
+        // 旧的 View 于是被静态 Map 长期持有(连带其 Activity/Window),浏览器常驻
+        // 进程里反复开关菜单会持续累积;分屏多实例时两套菜单还会互相干扰。
+        // 注意:必须在**赋值新引用之前**清理,否则清的是刚存进来的新值。
+        try {
+            synchronized (sRemoveMarks) {
+                sRemoveMarks.clear();
+            }
+        } catch (Throwable ignored) {}
+        // 上一轮的触摸代理也要解绑:它持有的 sProxiedRecycler 是旧 RecyclerView,
+        // 不清会导致 installTouchProxy 误判"已安装过"而不再挂到新实例上。
+        sProxiedRecycler = null;
+        sTouchProxy = null;
         sHandler = handler;
         sRecycler = recycler;
         sAdapter = adapter;
@@ -728,7 +743,11 @@ public final class MenuReorderHelper {
     // ✕ delete marks (shown while in edit mode).
     // ---------------------------------------------------------------------------------
 
-    private static final java.util.Map<View, View> sRemoveMarks = new java.util.HashMap<>();
+    // 2026-10-04:改用 ConcurrentHashMap。它是静态 Map,写入点在菜单交互路径、
+// 读取点在遍历绘制路径,原用 HashMap 时若两处并发会抛 ConcurrentModificationException;
+// 换并发容器后无需依赖"调用方恰好都在 UI 线程"这一隐含约定。
+    private static final java.util.Map<View, View> sRemoveMarks =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Draw a small ✕ badge on the top-right of every visible icon. */
     private static void showDeleteMarks() {
