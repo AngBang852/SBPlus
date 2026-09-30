@@ -150,7 +150,15 @@ final class Mp4Converter {
                     // 音频若缺 csd-0, 尝试从首个 sample 的 ADTS 头补 AudioSpecificConfig
                     String mime = "";
                     try { mime = fmt.getString(android.media.MediaFormat.KEY_MIME); } catch (Throwable ignored) {}
-                    if (mime != null && mime.equals("audio/mp4a-latm") && !fmt.containsKey("csd-0")) {
+                    // 2026-10-04 修复(审查 S15):原用 fmt.containsKey("csd-0") 判断 —— 但
+                // MediaFormat.containsKey(String) 是 **API 29(Android 10)** 才加入的方法,
+                // 本项目 minSdk 24。在 Android 7/8/9 上它抛 NoSuchMethodError,被本方法外层
+                // 的 catch(Throwable) 吞掉 → tsToMp4 必然返回 null;而 tsToMp4 恰是
+                // smartConvert 的兜底路径,于是"转码失败 → remux 兜底"整条链在低版本上全废。
+                // 改用"取值判空"这一语义等价、全版本可用的写法。
+                boolean hasCsd0;
+                try { hasCsd0 = fmt.getByteBuffer("csd-0") != null; } catch (Throwable ignoredCsd) { hasCsd0 = false; }
+                if (mime != null && mime.equals("audio/mp4a-latm") && !hasCsd0) {
                         byte[] cfg = decodeAacCsdFromExtractor(extractor, i);
                         if (cfg != null) {
                             fmt.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(cfg));
@@ -355,10 +363,15 @@ final class Mp4Converter {
                 // 解码器输出 Surface 直连编码器输入
                 vDec.configure(vFmt, encSurface, null, 0);
                 vDec.start();
-                // 编码器输出格式 -> muxer 轨
-                android.media.MediaFormat vOutFmt = vEnc.getOutputFormat();
-                encVTrack = muxer.addTrack(vOutFmt);
-                needVInfo = false;
+                // 2026-10-04 修复(审查 S16):**不要**在 start() 后立刻 getOutputFormat() 建轨。
+                // 编码器 start() 之后、首个输出帧之前,getOutputFormat() 多数设备上还不带
+                // csd-0(H.264 的 SPS/PPS);带 csd 的格式是在 INFO_OUTPUT_FORMAT_CHANGED
+                // 事件里给出的 —— 而主循环原先把该事件显式 ignore 了。
+                // 后果:addTrack 抛异常或建出无 csd 的坏轨 → 真转码路径静默失败并回落到
+                // remux,功能形同虚设。
+                // 改为:在此只登记"待建轨",等主循环收到 FORMAT_CHANGED 时用那一刻的 format
+                // 建轨(见下方 vFmtReady 分支)。
+                needVInfo = true;
             }
 
             // ---------- 音频: 源已是 AAC, 直接 remux 复制(不重编码, 1秒完成无损不卡死) ----------
@@ -442,13 +455,22 @@ final class Mp4Converter {
                         vDec.releaseOutputBuffer(dOut, render);
                         if ((dInfo.flags & android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) vEosOut = true;
                     } else if (dOut == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        // ignore
+                        // ignore(解码器输出格式变化与本流程无关:画面走 Surface 直连编码器)
                     }
                     // 编码器输出 -> muxer
                     int eOut = vEnc.dequeueOutputBuffer(vInfo, 5000);
                     if (eOut >= 0) {
                         java.nio.ByteBuffer eBuf = vEnc.getOutputBuffer(eOut);
                         if (vInfo.size > 0 && eBuf != null) {
+                            // 2026-10-04(S16):轨必须在收到 FORMAT_CHANGED 后才建立。
+                            // 若此处 encVTrack 仍为 -1,说明编码器还没给出带 csd 的输出格式
+                            // (极端设备上首帧早于该事件) —— 此时写入会抛异常,直接跳过该帧
+                            // 并记日志,而不是让它去污染 muxer。
+                            if (encVTrack < 0) {
+                                vEnc.releaseOutputBuffer(eOut, false);
+                                if ((vInfo.flags & android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) vEosOut = true;
+                                continue;
+                            }
                             // PTS 归一化到 0 起点 + 强制单调(源 PTS 乱序/大数会导致播放器跳帧)
                             long p = vInfo.presentationTimeUs;
                             if (vOutBase < 0) vOutBase = p;
@@ -473,7 +495,20 @@ final class Mp4Converter {
                             com.sbplus.browser.SbDownloadManager.post(ctx, task);
                         }
                     } else if (eOut == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        // ignore
+                        // 2026-10-04 修复(审查 S16):**在这里**建轨,而不是 start() 之后。
+                        // 编码器给出的这个 format 才带 csd-0(SPS/PPS);用它 addTrack 才能
+                        // 产出可正常解码的 H.264 轨。原实现忽略本事件、改用 start() 后立刻
+                        // getOutputFormat() 的格式建轨,多数设备上该格式缺 csd → 真转码
+                        // 路径静默失败并回落到 remux。
+                        try {
+                            android.media.MediaFormat vOutFmt = vEnc.getOutputFormat();
+                            encVTrack = muxer.addTrack(vOutFmt);
+                            needVInfo = false;
+                            MainModule.logMsg("[SBPlus] transcode v track added on FORMAT_CHANGED, track="
+                                    + encVTrack);
+                        } catch (Throwable ae) {
+                            MainModule.logMsg("[SBPlus] transcode v addTrack failed: " + ae);
+                        }
                     }
                 }
                 // 关闭视频解码器/编码器
