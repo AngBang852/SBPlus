@@ -21068,6 +21068,33 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
 
             if (okCount.get() == 0) return null;
 
+            // 2026-10-04 修复(审查 S4):拼接前必须校验**分片齐全**,缺一片就判失败。
+            // 原实现只看 okCount==0,worker 重试 3 次仍失败的分片只 failCount++ 就被永久跳过,
+            // 于是"缺片也照拼" —— mergeParts 遇到不存在的分片仅打一行 "missing (skipped)"
+            // 继续拼,产出一个内容缺失的 .ts.merge,随后转码并标记 STATUS_DONE。
+            // 用户拿到跳帧/花屏/时长错误的 MP4,界面却显示"下载完成",且中间文件已删无法重试。
+            // 这里改为:缺片即置任务失败,并**保留**已下分片供续传(不删),让用户能重试补齐。
+            int missing = 0;
+            try {
+                for (int s = 0; s < N; s++) {
+                    if (!new java.io.File(fTmp, fBase + ".part_" + s).exists()) missing++;
+                }
+            } catch (Throwable ignored) {}
+            if (missing > 0) {
+                MainModule.logMsg("[SBPlus] seg incomplete: missing=" + missing + "/" + N
+                        + " ok=" + okCount.get() + " fail=" + failCount.get()
+                        + " (parts kept for resume)");
+                com.sbplus.browser.SbDownloadManager.Task ft =
+                        com.sbplus.browser.SbDownloadManager.get(fTaskId);
+                if (ft != null) {
+                    ft.status = com.sbplus.browser.SbDownloadManager.STATUS_FAILED;
+                    ft.detail = T("分片缺失 ", "Missing parts ") + missing + "/" + N
+                            + T("(已保留分片,可重试续传)", " (parts kept, retry to resume)");
+                    com.sbplus.browser.SbDownloadManager.post(ctx, ft);
+                }
+                return null;
+            }
+
             // 暂停: 保留分片文件, 返回 null (任务保持暂停态, 恢复后重新进入续传)
             if (com.sbplus.browser.SbDownloadManager.isPaused(fTaskId)) {
                 MainModule.logMsg("[SBPlus] seg paused, parts kept for resume");
@@ -21110,7 +21137,14 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                         }
                         pf.delete();
                     } else {
-                        MainModule.logMsg("[SBPlus] seg #" + seq + " missing (skipped)");
+                        // 2026-10-04 修复(审查 S4,防御第二层):缺片直接失败,绝不"跳过继续拼"。
+                        // 调用方(21077 附近)已先校验齐全性,这里再兜一层:任何原因导致分片
+                        // 不在,都不能产出"看起来成功、实际内容缺失"的合并文件 —— 那种文件会
+                        // 被转码并标记下载完成,用户拿到花屏/跳帧的 MP4 却无从察觉。
+                        MainModule.logMsg("[SBPlus] mergeParts ABORT: seg #" + seq + " missing");
+                        try { fos.close(); } catch (Throwable ignored) {}
+                        try { out.delete(); } catch (Throwable ignored) {}
+                        return null;
                     }
                 }
                 fos.flush();
@@ -21370,6 +21404,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                         android.widget.LinearLayout.LayoutParams svLp = new android.widget.LinearLayout.LayoutParams(-1, 0, 1f);
                         root.addView(listScroller, svLp);
                         final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                        // 2026-10-04(S5):对话框引用提前声明 —— refreshListIn 的自动刷新需要
+                        // 用它判断"对话框是否还在显示",而按钮回调里也会调用它。
+                        final Object[] dlgRef = new Object[1];
 
                         bAll.setOnClickListener(new android.view.View.OnClickListener() {
                             @Override public void onClick(android.view.View v) {
@@ -21378,7 +21415,7 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                                 selectedSet.clear();
                                 if (allChecked[0]) for (com.sbplus.browser.SbDownloadManager.Task tt : ts) selectedSet.add(tt.id);
                                 bAll.setText(allChecked[0] ? T("全不选", "Deselect all") : T("全选", "Select all"));
-                                refreshListIn(act, root, list, h, selectedSet, bAll, bDel);
+                                refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef);
                             }
                         });
                         bDel.setOnClickListener(new android.view.View.OnClickListener() {
@@ -21413,13 +21450,12 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                                     selectedSet.clear();
                                     if (any) toastShort(T("已取消进行中任务(文件已删除)", "Cancelled running tasks (files removed)"));
                                     else toastShort(T("没有进行中的任务", "No running tasks"));
-                                    refreshListIn(act, root, list, h, selectedSet, bAll, bDel);
+                                    refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef);
                                 } catch (Throwable ignored) {}
                             }
                         });
 
-                        final Object[] dlgRef = new Object[1];
-                        refreshListIn(act, root, list, h, selectedSet, bAll, bDel);
+                        refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef);
                         // 限制对话框最大高度≈屏幕 85%, 避免列表溢出屏幕无法滚动
                         android.widget.FrameLayout wrap = new android.widget.FrameLayout(act);
                         int maxH = (int)(act.getResources().getDisplayMetrics().heightPixels * 0.85f);
@@ -21435,16 +21471,16 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                                 + " loader=" + System.identityHashCode(com.sbplus.browser.SbDownloadManager.class.getClassLoader()));
                         // 任务注册在后台线程,弹层瞬间可能还没就绪 -> 延迟刷新两次把后续注册的任务补进来
                         h.postDelayed(new Runnable() { @Override public void run() {
-                            try { refreshListIn(act, root, list, h, selectedSet, bAll, bDel); } catch (Throwable ignored) {}
+                            try { refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef); } catch (Throwable ignored) {}
                         }}, 500);
                         h.postDelayed(new Runnable() { @Override public void run() {
-                            try { refreshListIn(act, root, list, h, selectedSet, bAll, bDel); } catch (Throwable ignored) {}
+                            try { refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef); } catch (Throwable ignored) {}
                         }}, 1500);
                         h.postDelayed(new Runnable() { @Override public void run() {
-                            try { if (((android.app.AlertDialog) dlgRef[0]).isShowing()) refreshListIn(act, root, list, h, selectedSet, bAll, bDel); } catch (Throwable ignored) {}
+                            try { if (((android.app.AlertDialog) dlgRef[0]).isShowing()) refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef); } catch (Throwable ignored) {}
                         }}, 3000);
                         h.postDelayed(new Runnable() { @Override public void run() {
-                            try { if (((android.app.AlertDialog) dlgRef[0]).isShowing()) refreshListIn(act, root, list, h, selectedSet, bAll, bDel); } catch (Throwable ignored) {}
+                            try { if (((android.app.AlertDialog) dlgRef[0]).isShowing()) refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef); } catch (Throwable ignored) {}
                         }}, 5000);
                     } catch (Throwable t) { MainModule.logMsg("[SBPlus] showDownloadList ui error: " + t); }
                 }
@@ -21455,7 +21491,8 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
     private static void refreshListIn(final android.app.Activity act, final android.widget.LinearLayout root,
                                final android.widget.LinearLayout list, final android.os.Handler h,
                                final java.util.Set<String> selectedSet,
-                               final android.widget.Button bAll, final android.widget.Button bDel) {
+                               final android.widget.Button bAll, final android.widget.Button bDel,
+                               final Object[] dlgRef) {
         try {
             list.removeAllViews();
             java.util.List<com.sbplus.browser.SbDownloadManager.Task> tasks = com.sbplus.browser.SbDownloadManager.all();
@@ -21537,7 +21574,7 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                                     sAppContext.sendBroadcast(pi);
                                     toastShort(T("已暂停,已下载分片保留", "Paused, parts kept"));
                                 }
-                                refreshListIn(act, root, list, h, selectedSet, bAll, bDel);
+                                refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef);
                             } catch (Throwable t2) { MainModule.logMsg("[SBPlus] pause btn error: " + t2); }
                         }
                     });
@@ -21556,9 +21593,18 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 if (!ts.isEmpty()) bAll.setText(all ? T("全不选", "Deselect all") : T("全选", "Select all"));
             }
             // 1.5秒后自动刷新(进度/速度同步)
+            // 2026-10-04 修复(审查 S5):续跑判据必须是「对话框仍在显示」。
+            // 原实现判 list.getParent() != null —— 那是 View 树父子关系,dialog dismiss 后
+            // 视图仍挂在 root 下,条件恒真:每 1.5 秒全量 removeAllViews + 重建 + 查任务表,
+            // 永不停止,Handler 链还持有 act/root/list 整棵视图树与 Activity。
+            // 同文件 21446/21449 早已用对判据(dlgRef.isShowing()),这里补上。
             h.postDelayed(new Runnable() {
                 @Override public void run() {
-                    try { if (list.getParent() != null) refreshListIn(act, root, list, h, selectedSet, bAll, bDel); } catch (Throwable ignored) {}
+                    try {
+                        if (dlgRef == null || dlgRef[0] == null
+                                || !((android.app.AlertDialog) dlgRef[0]).isShowing()) return;
+                        refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef);
+                    } catch (Throwable ignored) {}
                 }
             }, 1500);
         } catch (Throwable t) { MainModule.logMsg("[SBPlus] refreshListIn error: " + t); }
