@@ -118,7 +118,19 @@ final class M3u8Helper {
                 if (line.startsWith("#")) continue;
                 String resolved = resolveUrl(line, baseUrl);
                 String pl = resolved.split("[?#]")[0].toLowerCase();
-                if (pl.endsWith(".ts") || pl.endsWith(".m4s") || pl.endsWith(".aac") || pl.endsWith(".mp3")) {
+                // 2026-10-04 修复:原实现只认扩展名(.ts/.m4s/.aac/.mp3),于是
+                // 无扩展名分片(不少站点写成 /seg-12?token=xx 或 /media/12345)
+                // 被全部丢弃 → 分片列表为空、下载静默失败。这里放宽:无法从扩展名
+                // 判断时,只要该行是 m3u8 分片行的常规形态就收录(已排除 # 注释行)。
+                // 判据:路径段非空且不是明显非媒体资源(图片/样式/脚本/字体等)。
+                boolean hasMediaExt = pl.endsWith(".ts") || pl.endsWith(".m4s")
+                        || pl.endsWith(".aac") || pl.endsWith(".mp3")
+                        || pl.endsWith(".mp4") || pl.endsWith(".m4a")
+                        || pl.endsWith(".ogg") || pl.endsWith(".opus");
+                if (hasMediaExt) {
+                    segs.add(resolved);
+                } else if (pl.length() > 0 && !isObviouslyNonMedia(pl)) {
+                    // 无扩展名/非常见扩展名 → 按分片收录(宁可多收,由下载失败兜底)
                     segs.add(resolved);
                 }
             }
@@ -129,18 +141,59 @@ final class M3u8Helper {
         }
     }
 
-    /** 相对/绝对 URL 统一解析为绝对 URL。异常时原样返回,不抛。 */
+    /**
+     * 判断一个(已小写、已去 query/fragment 的)路径是否**明显不是**媒体分片。
+     *
+     * <p>2026-10-04 新增:配合 parseM3u8Ts 放宽"无扩展名分片"的收录。
+     * 只排除明确属于网页资源/清单的类型 —— 拿不准的一律**收录**
+     * (收录错了顶多是一次下载失败,漏收则是整段视频缺失)。
+     */
+    private static boolean isObviouslyNonMedia(String pl) {
+        String[] bad = {".html", ".htm", ".js", ".css", ".json", ".xml", ".txt",
+                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+                ".woff", ".woff2", ".ttf", ".otf", ".eot",
+                ".php", ".asp", ".jsp", ".m3u8", ".m3u"};
+        for (String b : bad) if (pl.endsWith(b)) return true;
+        return false;
+    }
+
+    /**
+     * 相对/绝对 URL 统一解析为绝对 URL。异常时原样返回,不抛。
+     *
+     * <p>2026-10-04 两处修复:
+     * <ul>
+     *   <li><b>以 "/" 开头的绝对路径引用</b> —— 原实现把它当相对路径拼在 base 目录后,
+     *       得到 {@code host/a/b//seg.ts} 这类错误 URL(分片 404)。改为用
+     *       {@code new URL(base, u)} 交给标准解析器处理,它同时覆盖 "/path"、
+     *       相对路径、协议相对("//host/x")与带 query 的引用。</li>
+     *   <li><b>base 的 query 被无条件剥掉</b> —— 签名型 m3u8(如 {@code ?token=xxx})
+     *       的**分片 URL 往往需要继承同一组参数**,剥掉后分片请求会因签名缺失被拒。
+     *       改为:相对引用自身不带 '?' 时,把 base 的 query 附加到结果上。</li>
+     * </ul>
+     */
     static String resolveUrl(String u, String base) {
         try {
             if (u == null) return base;
             if (u.startsWith("http://") || u.startsWith("https://")) return u;
-            if (u.startsWith("//")) return "https:" + u;
             if (base == null) return u;
-            int q = base.indexOf('?');
-            String baseN = (q >= 0) ? base.substring(0, q) : base;
-            int slash = baseN.lastIndexOf('/');
-            String dir = (slash >= 0) ? baseN.substring(0, slash + 1) : baseN + "/";
-            return dir + u;
+            // 标准解析:能正确处理 /path、相对路径、//host/path
+            String out;
+            try {
+                out = new java.net.URL(new java.net.URL(base), u).toString();
+            } catch (Throwable t) {
+                // 退化到原手工拼接(仅在标准解析失败时)
+                int q = base.indexOf('?');
+                String baseN = (q >= 0) ? base.substring(0, q) : base;
+                int slash = baseN.lastIndexOf('/');
+                String dir = (slash >= 0) ? baseN.substring(0, slash + 1) : baseN + "/";
+                out = dir + u;
+            }
+            // 签名参数继承:相对引用没带 query 时,沿用 base 的 query
+            if (out.indexOf('?') < 0) {
+                int bq = base.indexOf('?');
+                if (bq >= 0) out = out + base.substring(bq);
+            }
+            return out;
         } catch (Throwable t) { return u; }
     }
 

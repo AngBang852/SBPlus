@@ -227,11 +227,21 @@ public class HomeLogoHelper {
                 }
             }
             // 兜底: 目录里实际存在的文件
+            // 2026-10-04 修复:过滤 .tmp 残留。
+            // 保存 Logo 走"写 .tmp 再 rename"的原子落盘(见 saveFromUri),进程在
+            // rename 之前被杀会留下半截 .tmp 文件。原实现把它们一并列出,用户可能
+            // 选中一个损坏的图;对照 FontHelper.listFonts 已有显式清理逻辑,此处对齐。
             File dirFile = dir(ctx);
             File[] fs = dirFile.listFiles();
             if (fs != null) {
                 for (File f : fs) {
-                    if (!res.contains(f.getName())) res.add(f.getName());
+                    String fn = f.getName();
+                    if (fn.endsWith(".tmp")) {
+                        // 顺手清理:残留文件没有任何保留价值(它本应被 rename 掉)
+                        try { f.delete(); } catch (Throwable ignored) {}
+                        continue;
+                    }
+                    if (!res.contains(fn)) res.add(fn);
                 }
             }
         } catch (Throwable t) {

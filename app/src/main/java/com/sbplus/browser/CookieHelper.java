@@ -733,16 +733,41 @@ public final class CookieHelper {
         return ok;
     }
 
-    /** 探测某列是否存在。跨 Chromium 版本表结构会变化,写入前必须确认。 */
+    /**
+     * 探测某列是否存在。跨 Chromium 版本表结构会变化,写入前必须确认。
+     *
+     * <p>2026-10-04 性能修复:加列集合缓存。原实现每次调用都执行一次
+     * {@code PRAGMA table_info(cookies)}(全表结构查询),而 {@link #buildCookieRow}
+     * 每条 cookie 要问 4 个列 —— 批量导入 N 条就是 **4N 次 PRAGMA**。
+     * 列集合在同一个库连接的生命周期内不会变,缓存后降为每连接一次。
+     * 缓存键用库路径,避免不同库(理论上)串味;异常时不缓存,退化为原行为。
+     */
+    private static final java.util.Map<String, java.util.Set<String>> COLUMN_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>>();
+
     private static boolean hasColumn(SQLiteDatabase db, String table, String col) {
+        if (db == null) return false;
+        String key = null;
+        try { key = db.getPath(); } catch (Throwable ignored) {}
+        if (key != null && table != null) {
+            java.util.Set<String> cols = COLUMN_CACHE.get(key + "|" + table);
+            if (cols != null) return cols.contains(col);
+        }
         Cursor c = null;
+        java.util.Set<String> found = new java.util.HashSet<String>();
         try {
             c = db.rawQuery("PRAGMA table_info(" + table + ")", null);
             int idx = c.getColumnIndex("name");
             if (idx < 0) return false;
             while (c.moveToNext()) {
-                if (col.equals(c.getString(idx))) return true;
+                String n = c.getString(idx);
+                if (n != null) found.add(n);
             }
+            // 探测成功才缓存(异常路径不缓存,下次仍按原逻辑重试)
+            if (key != null && table != null && !found.isEmpty()) {
+                COLUMN_CACHE.put(key + "|" + table, found);
+            }
+            return found.contains(col);
         } catch (Throwable t) {
             XposedBridgeLog("hasColumn err: " + t);
         } finally {

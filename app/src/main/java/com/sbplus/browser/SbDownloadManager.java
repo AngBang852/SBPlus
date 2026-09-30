@@ -30,7 +30,11 @@ public class SbDownloadManager {
         public final String id;
         public String name;          // 文件名
         public int status;           // STATUS_*
-        public long totalBytes = 0;  // 已下载字节
+        // 2026-10-04 修复:totalBytes 改为 volatile。
+        // 下方 lastBytes/lastTime 的注释已说明"非 volatile 的 long 在 32 位进程上有
+        // 撕裂读风险",但当时漏了 totalBytes 本身 —— 它同样由 worker 线程写入、
+        // 由通知栏(系统 UI 线程)经 percent() 读取,而且是"已下载字节"这个主指标。
+        public volatile long totalBytes = 0;  // 已下载字节
         public long totalSizeBytes = 0; // 源文件总大小(可预知时; 未知为0)
         public volatile long partCount = 0;   // 已完成分片
         public volatile long partTotal = 0;   // 总分片
@@ -278,8 +282,35 @@ public class SbDownloadManager {
         return t;
     }
 
+    /**
+     * 任务 id → 通知 id。
+     *
+     * <p>2026-10-04 修复:原实现 {@code (id.hashCode() & 0x7fffffff) % 50000},
+     * 两个不同任务可能映射到同一通知 id —— 后者的通知会覆盖前者,且 PendingIntent
+     * 的 requestCode 若也相同会互相复用(点通知打开的是错误的任务)。
+     * 这里改为:按 id 在 ORDER 中的**稳定序号**分配,并在出现碰撞时线性探测。
+     * 任务量级为个位数,冲突概率极低,但一旦发生就是"任务 A 的通知点开是任务 B"。
+     */
+    private static final java.util.Map<String, Integer> NOTIF_IDS =
+            new java.util.concurrent.ConcurrentHashMap<String, Integer>();
+
     private static int notifId(String id) {
-        return (id.hashCode() & 0x7fffffff) % 50000;
+        if (id == null) return 0;
+        Integer cached = NOTIF_IDS.get(id);
+        if (cached != null) return cached;
+        // 用 hash 作起点,但确保不与已分配的重复
+        int base = (id.hashCode() & 0x7fffffff) % 50000;
+        synchronized (NOTIF_IDS) {
+            Integer again = NOTIF_IDS.get(id);
+            if (again != null) return again;
+            int candidate = base;
+            for (int probe = 0; probe < 50000; probe++) {
+                int c = (base + probe) % 50000;
+                if (!NOTIF_IDS.containsValue(c)) { candidate = c; break; }
+            }
+            NOTIF_IDS.put(id, candidate);
+            return candidate;
+        }
     }
 
     private static NotificationManager nm(Context ctx) {

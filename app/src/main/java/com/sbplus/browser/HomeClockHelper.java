@@ -62,10 +62,18 @@ public class HomeClockHelper {
         if (p != null) p.edit().putBoolean("enabled", en).apply();
     }
 
-    /** 精确到秒. */
+    /**
+     * 精确到秒。
+     *
+     * <p>2026-10-04:保留"默认开"的语义(prefs 不可用时返回 true),但补注释说明
+     * 它与本类其它 getter 的默认方向**不同** —— 其它 getter 读不到时返回 false。
+     * 这不是笔误:秒针属于"默认展示更完整"的选项,而"是否跟随系统""是否显示"
+     * 这类开关默认关更符合预期。统一方向会改变用户可见的默认表现,故保持原样,
+     * 只把差异写清楚以免后人误"修正"。
+     */
     public static boolean isSeconds(Context ctx) {
         SharedPreferences p = prefs(ctx);
-        return p == null || p.getBoolean("seconds", true);   // 默认开
+        return p == null || p.getBoolean("seconds", true);   // 默认开(与其它 getter 相反,见上)
     }
 
     public static void setSeconds(Context ctx, boolean on) {
