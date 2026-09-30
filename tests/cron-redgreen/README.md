@@ -13,7 +13,12 @@
 |---|---|
 | `CronT.java` | `CronUtils.parseCronField` —— 步长 0/负数不死循环、区间越界截断、合法步长不变（7 条） |
 | `CronMatchesT.java` | `CronUtils.cronMatches` —— 日/周 OR 语义、段数必须恰为 5、once 段级语法、正常 5 段回归（17 条） |
+| `VersionT.java` | `StrUtils.isNewerVersion` —— 数字点分比较、v 前缀、预发布段、不可解析时保守返回 false（20 条） |
 | `MainModule.java` | `MainModule.logMsg` 的桩实现（把日志转 `System.out`），让 `CronUtils` 能脱离 Android 编译 |
+
+> `VersionT` 测的逻辑原在 `UpdateChecker` 里，因该类依赖 `android.content/os`
+> 无法脱离 Android SDK 编译而长期无法测试；2026-10-04 已迁到 `StrUtils`
+> （零 Android 依赖），`UpdateChecker.isNewer` 保留为薄委托。
 
 ### 为什么没有 `CronUtils.java`
 

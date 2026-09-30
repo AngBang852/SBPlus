@@ -15,6 +15,68 @@ final class StrUtils {
     private StrUtils() {}
 
     /**
+     * 版本号比较:远端是否比本地更新。
+     *
+     * <p>2026-10-04 从 {@code UpdateChecker.isNewer} 迁入 —— 该逻辑是纯函数,
+     * 而 UpdateChecker 本身依赖 android.content/os 等类,无法脱离 Android SDK
+     * 编译,导致这条逻辑一直无法做单元测试。迁到本类(零 Android 依赖)后
+     * 可由 {@code tests/cron-redgreen/VersionT.java} 直接跑。
+     * {@code UpdateChecker.isNewer} 保留为薄委托,调用方无需改动。
+     *
+     * <p>行为(含本次修复):
+     * <ul>
+     *   <li>支持 {@code v} 前缀、段数不等(缺段按 0 计);</li>
+     *   <li>支持预发布后缀({@code -beta}/{@code -rc1} 等):数字部分相同时,
+     *       无后缀 &gt; 有后缀,符合语义版本规范({@code 1.0.0 > 1.0.0-beta});</li>
+     *   <li><b>无法解析时保守返回 false</b> —— 原实现回退为"字符串不等即有更新",
+     *       会把用户引向比当前更旧的版本(如本地 {@code 2.6.0-beta} 对上远端
+     *       {@code 2.2})。漏报只是"没收到升级提示",误报却是"装回旧版",
+     *       后者明显更糟。</li>
+     * </ul>
+     */
+    static boolean isNewerVersion(String remote, String local) {
+        String r = (remote == null ? "" : remote).trim();
+        String l = (local == null ? "" : local).trim();
+        if (r.isEmpty()) return false;
+        if (l.isEmpty()) return true;
+        // strip leading 'v'
+        if (r.toLowerCase().startsWith("v")) r = r.substring(1);
+        if (l.toLowerCase().startsWith("v")) l = l.substring(1);
+        // 拆出"数字点分部分"与"预发布后缀"(-beta/-rc1 等)
+        String rNum = r, lNum = l, rSuf = "", lSuf = "";
+        int rDash = indexOfVersionSuffix(r);
+        if (rDash >= 0) { rNum = r.substring(0, rDash); rSuf = r.substring(rDash + 1); }
+        int lDash = indexOfVersionSuffix(l);
+        if (lDash >= 0) { lNum = l.substring(0, lDash); lSuf = l.substring(lDash + 1); }
+        try {
+            String[] rp = rNum.split("\\.");
+            String[] lp = lNum.split("\\.");
+            int n = Math.max(rp.length, lp.length);
+            for (int i = 0; i < n; i++) {
+                int rv = i < rp.length ? Integer.parseInt(rp[i].trim()) : 0;
+                int lv = i < lp.length ? Integer.parseInt(lp[i].trim()) : 0;
+                if (rv != lv) return rv > lv;
+            }
+            // 数字部分完全相同 → 比预发布后缀:无后缀 > 有后缀
+            if (rSuf.isEmpty() && lSuf.isEmpty()) return false;
+            if (rSuf.isEmpty()) return true;      // 远端正式版,本地预发布 → 远端更新
+            if (lSuf.isEmpty()) return false;     // 远端预发布,本地正式版 → 不更新
+            return rSuf.compareToIgnoreCase(lSuf) > 0;
+        } catch (NumberFormatException e) {
+            return false;   // 解析不出数字段 → 保守判为"无更新"
+        }
+    }
+
+    /** 找到版本预发布后缀的起始位置('-','_','+'),没有则返回 -1。 */
+    private static int indexOfVersionSuffix(String v) {
+        for (int i = 0; i < v.length(); i++) {
+            char c = v.charAt(i);
+            if (c == '-' || c == '_' || c == '+') return i;
+        }
+        return -1;
+    }
+
+    /**
      * 把任意文本净化为可用作文件名的字符串。
      *
      * <p>替换 Windows/Unix 非法字符为下划线,裁剪首尾空白,超长截断到 60 字符。

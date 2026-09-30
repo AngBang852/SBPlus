@@ -123,15 +123,22 @@ public final class ModelListFetcher {
         }
 
         // 形状 3: 纯字符串数组 ["a","b"] —— 只在没找到 id 字段时尝试
+        // 2026-10-04 修复(审查中等项):原实现用一条宽松正则扫描**整段 JSON 里任意
+        // 合法字符串**,只排除 6 个字段名。于是 owned_by / 描述文本 / 错误消息
+        // (如 "invalid_api_key")都会被当成可勾选的"模型",用户选到垃圾项后要到
+        // 真正调用时才失败。这里收窄为:只在**顶层确实是纯字符串数组**时才解析,
+        // 且只取形如模型名的 token(含字母数字与 . _ - : /,且不像错误消息)。
         if (out.isEmpty()) {
-            java.util.regex.Matcher m2 = java.util.regex.Pattern.compile(
-                    "\"([A-Za-z0-9][A-Za-z0-9._:\\-/]{1,80})\"").matcher(json);
-            while (m2.find()) {
-                String id = m2.group(1);
-                // 排除明显是字段名的项
-                if (id.equals("data") || id.equals("object") || id.equals("model")
-                        || id.equals("id") || id.equals("list") || id.equals("models")) continue;
-                if (seen.add(id)) out.add(new Model(id, null));
+            String trimmed = json.trim();
+            if (trimmed.startsWith("[") && trimmed.indexOf('{') < 0) {
+                // 顶层是数组且内部无对象 → 纯字符串数组
+                java.util.regex.Matcher m2 = java.util.regex.Pattern.compile(
+                        "\"([A-Za-z0-9][A-Za-z0-9._:\\-/]{1,80})\"").matcher(trimmed);
+                while (m2.find()) {
+                    String id = m2.group(1);
+                    if (isFieldNameLike(id)) continue;
+                    if (seen.add(id)) out.add(new Model(id, null));
+                }
             }
         }
 
@@ -151,8 +158,67 @@ public final class ModelListFetcher {
         return sb.toString();
     }
 
+    /**
+     * 判断一个 token 是否"像字段名/状态词"而非模型名(供纯字符串数组兜底解析用)。
+     *
+     * <p>2026-10-04 新增:收窄兜底解析的误收面。除了常见字段名,还挡掉形如
+     * 错误消息的 token —— 它们通常带下划线且是全小写短语(如 invalid_api_key)。
+     */
+    private static boolean isFieldNameLike(String id) {
+        if (id == null || id.isEmpty()) return true;
+        String low = id.toLowerCase(java.util.Locale.US);
+        String[] names = {"data", "object", "model", "id", "list", "models", "error",
+                "message", "type", "status", "code", "created", "owned_by", "usage",
+                "prompt", "completion", "detail", "reason", "success"};
+        for (String n : names) if (low.equals(n)) return true;
+        // 形如 error / invalid_api_key / rate_limit_exceeded 的错误消息样式:
+        // 纯小写 + 下划线,且不含数字点号(模型名通常含数字或点,如 gpt-4o / claude-3.5)
+        if (low.matches("[a-z]+(_[a-z]+)+")) return true;
+        return false;
+    }
+
+    /**
+     * 反转义 JSON 字符串字面量里的转义序列。
+     *
+     * <p>2026-10-04 修复:原实现用链式 {@code replace} 按 {@code \/ → \" → \\} 顺序
+     * 替换,这种写法对转义序列本质上不可靠 —— 任何一条规则都可能吃掉后面规则
+     * 本应处理的反斜杠(典型输入 {@code \\/} 会被 {@code \/} 规则先吃掉中间的斜杠)。
+     * 这里改为**单遍左到右扫描**:遇 {@code \} 就看下一个字符,一次消费两个字符,
+     * 不存在规则间互相干扰。
+     */
     private static String unescape(String s) {
-        return s.replace("\\/", "/").replace("\\\"", "\"").replace("\\\\", "\\");
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != '\\' || i + 1 >= s.length()) { sb.append(c); continue; }
+            char n = s.charAt(++i);   // 消费下一个字符
+            switch (n) {
+                case 'n': sb.append('\n'); break;
+                case 't': sb.append('\t'); break;
+                case 'r': sb.append('\r'); break;
+                case 'b': sb.append('\b'); break;
+                case 'f': sb.append('\f'); break;
+                case '"': sb.append('"'); break;
+                case '\\': sb.append('\\'); break;
+                case '/': sb.append('/'); break;
+                case 'u':
+                    // Unicode 转义(u 后跟 4 位十六进制)
+                    if (i + 4 < s.length()) {
+                        try {
+                            sb.append((char) Integer.parseInt(s.substring(i + 1, i + 5), 16));
+                            i += 4;
+                        } catch (NumberFormatException e) {
+                            sb.append('u');   // 非法转义 → 原样保留 u
+                        }
+                    } else {
+                        sb.append('u');
+                    }
+                    break;
+                default: sb.append(n); break;   // 未知转义 → 保留该字符
+            }
+        }
+        return sb.toString();
     }
 
     private static String stripTrailingSlash(String s) {

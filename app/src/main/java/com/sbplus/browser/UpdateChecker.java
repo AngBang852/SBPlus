@@ -133,29 +133,14 @@ public class UpdateChecker {
 
     /**
      * Compare two version strings (numeric dotted or "v"-prefixed). Returns true when
-     * remote > local. Falls back to plain string inequality if not parseable.
+     * remote &gt; local.
+     *
+     * <p>2026-10-04:实现已迁到 {@link StrUtils#isNewerVersion} —— 该逻辑是纯函数,
+     * 而本类依赖 android.content/os 等,脱离 Android SDK 无法编译,导致这条逻辑
+     * 长期没有单元测试。保留本方法为薄委托,现有调用方无需改动。
      */
     static boolean isNewer(String remote, String local) {
-        String r = (remote == null ? "" : remote).trim();
-        String l = (local == null ? "" : local).trim();
-        if (r.isEmpty()) return false;
-        if (l.isEmpty()) return true;
-        // strip leading 'v'
-        if (r.toLowerCase().startsWith("v")) r = r.substring(1);
-        if (l.toLowerCase().startsWith("v")) l = l.substring(1);
-        try {
-            String[] rp = r.split("\\.");
-            String[] lp = l.split("\\.");
-            int n = Math.max(rp.length, lp.length);
-            for (int i = 0; i < n; i++) {
-                int rv = i < rp.length ? Integer.parseInt(rp[i].trim()) : 0;
-                int lv = i < lp.length ? Integer.parseInt(lp[i].trim()) : 0;
-                if (rv != lv) return rv > lv;
-            }
-            return false;
-        } catch (NumberFormatException e) {
-            return !r.equals(l);
-        }
+        return StrUtils.isNewerVersion(remote, local);
     }
 
     /** Open the apk download URL in the user's browser. */
