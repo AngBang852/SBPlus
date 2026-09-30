@@ -482,9 +482,27 @@ public final class FontHelper {
         del.setTextSize(12);
         del.setOnClickListener(new android.view.View.OnClickListener() {
             @Override public void onClick(android.view.View v) {
-                deleteFont(ctx, name);
-                toast(ctx, "已删除: " + name);
-                refreshList(ctx);
+                // 2026-10-04 修复:加二次确认。
+                // 原实现点一下就直接 deleteFont —— 而字体文件是用户自己导入的
+                // (通常来自存储或下载),删掉无法恢复,且按钮就在列表行上、
+                // 与"选中该字体"的行点击紧邻,极易误触。
+                try {
+                    new android.app.AlertDialog.Builder(ctx)
+                        .setTitle("删除字体")
+                        .setMessage("确定删除「" + displayName(ctx, name) + "」?\n"
+                                + "字体文件会被移除,此操作不可撤销。")
+                        .setPositiveButton("删除", new android.content.DialogInterface.OnClickListener() {
+                            @Override public void onClick(android.content.DialogInterface d, int w) {
+                                deleteFont(ctx, name);
+                                toast(ctx, "已删除: " + name);
+                                refreshList(ctx);
+                            }
+                        })
+                        .setNegativeButton("取消", null)
+                        .show();
+                } catch (Throwable t) {
+                    XposedBridgeLog("confirm delete err: " + t);
+                }
             }
         });
         row.addView(del);

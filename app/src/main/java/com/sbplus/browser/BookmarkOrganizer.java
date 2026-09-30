@@ -201,6 +201,23 @@ public final class BookmarkOrganizer {
                 // 造出这种东西，复用它们比再造一个干净。
                 Long orphan = findOrphanFolder(db, name);
                 if (orphan != null) {
+                    // 2026-10-04 修复:复用孤儿文件夹时必须把它**挂回新父级**。
+                    // 原实现只借用它的 _ID(见下方 existing = orphan),却没有 UPDATE
+                    // 它的 PARENT —— 于是这个文件夹的父级仍指向一个已不存在的 id,
+                    // 整棵子树在浏览器里依然断链/不可见,"复用"只省了一次插入,
+                    // 并没有真正修复结构。这里补一次 UPDATE。
+                    // 注意:必须在借用之前改,否则 last 会指向一个仍断链的节点。
+                    try {
+                        android.content.ContentValues pv = new android.content.ContentValues();
+                        pv.put("PARENT", rootParent);
+                        pv.put("DIRTY", 1);   // 标记需同步,与项目其它写入一致
+                        int n = db.update("BOOKMARKS", pv, "_ID=?",
+                                new String[]{ String.valueOf(orphan) });
+                        MainModule.logMsg("[SBPlus] orphan folder " + orphan
+                                + " re-parented to " + rootParent + " (rows=" + n + ")");
+                    } catch (Throwable te) {
+                        MainModule.logMsg("[SBPlus] re-parent orphan failed: " + te);
+                    }
                     MainModule.logMsg("[SBPlus] reuse orphan folder '" + name + "' id=" + orphan);
                     existing = orphan;
                 }

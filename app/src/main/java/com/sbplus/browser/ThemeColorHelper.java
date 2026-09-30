@@ -253,7 +253,10 @@ public final class ThemeColorHelper {
                 rows = CHILDREN[parentRoot];
                 labels = CHILD_ZH[parentRoot];
                 slots = rows;
-                title = labels[0].length() > 0 ? ROOT_ZH[parentRoot] : ROOT_ZH[parentRoot];
+                // 2026-10-04 修复:原为 labels[0].length() > 0 ? ROOT_ZH[..] : ROOT_ZH[..]
+                // —— 两个分支完全相同(死条件),且 labels[0] 为 null 时会直接 NPE
+                // (子页标题本可以留空表示"无标题")。直接取 ROOT_ZH。
+                title = ROOT_ZH[parentRoot];
             } else {
                 rows = new int[]{0,1,2,3,4,5,6,7,8};
                 labels = ROOT_ZH;

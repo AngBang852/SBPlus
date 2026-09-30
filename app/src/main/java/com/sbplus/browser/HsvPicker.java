@@ -28,9 +28,13 @@ public class HsvPicker extends View {
     private View preview;
     private boolean selfUpdate = false;
 
-    private int svH = 200;   // SV 面高度(px), 更大更好操作
-    private int hueH = 44;   // 色相条高度(px)
-    private int pad = 12;
+    // 2026-10-04 修复:尺寸改为按 dp 换算。
+    // 原值是裸像素常量(200/44/12),在高密度屏(3x)上取色面只有约 67dp 高、
+    // 色相条仅 15dp —— 手指几乎点不准;低密度屏上又过大。dp() 依赖 getResources(),
+    // 构造期可用,故在 init() 里赋值。
+    private int svH;         // SV 面高度
+    private int hueH;        // 色相条高度
+    private int pad;
 
     // ---- 渐变缓存(2026-09-17 新增) ----
     // onDraw 在拖动时逐帧调用,而原实现每次都要 new 三个 LinearGradient:
@@ -57,9 +61,13 @@ public class HsvPicker extends View {
     public HsvPicker(Context c) { super(c); init(); }
 
     private void init() {
+        // 2026-10-04:尺寸按 dp 初始化(见字段声明处的说明)
+        svH = dp(150);
+        hueH = dp(34);
+        pad = dp(10);
         paint.setAntiAlias(true);
         stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(2f);
+        stroke.setStrokeWidth(dp(2));
         stroke.setColor(0xFF000000);
     }
 
@@ -105,9 +113,19 @@ public class HsvPicker extends View {
 
     @Override
     protected void onMeasure(int wspec, int hspec) {
+        // 2026-10-04 修复:尊重 MeasureSpec 模式,并把兜底宽度改为 dp。
+        // 原实现只取 getSize()(不区分 EXACTLY/AT_MOST/UNSPECIFIED),且 w==0 时
+        // 硬编码 400px —— 在 ScrollView 等 AT_MOST/UNSPECIFIED 容器里会取到
+        // 不合期望的尺寸,高密度屏上 400px 又远小于可用宽度。
         int w = MeasureSpec.getSize(wspec);
-        if (w == 0) w = 400;
-        setMeasuredDimension(w, svH + hueH + pad * 4 + dp(20));
+        if (MeasureSpec.getMode(wspec) != MeasureSpec.EXACTLY) {
+            w = Math.max(w, dp(240));   // 非精确约束下至少给一个可用的最小宽度
+        }
+        int h = svH + hueH + pad * 4 + dp(20);
+        if (MeasureSpec.getMode(hspec) == MeasureSpec.EXACTLY) {
+            h = MeasureSpec.getSize(hspec);   // 容器给了确定高度就听容器的
+        }
+        setMeasuredDimension(w, h);
     }
 
     @Override

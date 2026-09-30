@@ -27,7 +27,16 @@ public final class LogWriter {
     /** Called once the target app Application context is captured. */
     public static void init(Context ctx) {
         if (ctx == null) return;
-        sContext = ctx;
+        // 2026-10-04 修复:静态字段必须持有 Application Context,不能持有 Activity。
+        // sContext 是 static 且长期存活,若调用方传进来的是 Activity,该 Activity
+        // 会被静态引用钉住直到进程结束(典型的 Activity 泄漏);而且跨进程写日志
+        // 只需要 Application 级别的 Context,没有理由持 Activity。
+        // getApplicationContext() 在 Application 本身上调用会返回自身,故对
+        // 已是 Application 的入参无副作用;个别 Context 包装器可能返回 null,
+        // 此时退回原入参以免日志功能整体失效。
+        Context app = null;
+        try { app = ctx.getApplicationContext(); } catch (Throwable ignored) {}
+        sContext = (app != null) ? app : ctx;
         MainModule.logMsg("[SBPlus] LogWriter ready (provider-backed)");
     }
 
