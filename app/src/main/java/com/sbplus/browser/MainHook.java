@@ -17003,9 +17003,74 @@ private static void showUaGroupDialog(final Context ctx) {
     }
 
     /** 简单 HTTP GET,返回响应体字符串。用 read() 批量读+长超时,避免大脚本下载中断截断。 */
+    /**
+     * 公网 http(s) 地址校验(S8)。
+     *
+     * <p>为什么需要:{@code @require} / {@code @resource} / {@code @updateURL} 的 URL 全部
+     * 来自**脚本元数据**(第三方可写),而 {@link #httpGet} 原先不做任何地址检查就发请求。
+     * 装一个恶意脚本即可让浏览器进程去探测内网服务、路由器后台或云元数据端点
+     * (169.254.169.254) —— 典型 SSRF 面,与 GM_xhr 那套 @connect 门槛不对称。
+     *
+     * <p>判据与 SbplusJsBridge.isRequestAllowed 保持一致:只放行 http/https 且主机名
+     * 不属于本机/内网/链路本地;并拒绝非规范 IP 字面量(整数、十六进制、八进制写法),
+     * 它们会被底层解析成内网地址却骗过字符串级判断。
+     *
+     * <p>注意:正常脚本抓的是公网 CDN / API,不受影响;被拒时记日志便于排障。
+     */
+    private static boolean isPublicHttpUrl(String url) {
+        try {
+            if (url == null || url.isEmpty()) return false;
+            java.net.URL u = new java.net.URL(url);
+            String proto = u.getProtocol();
+            if (!"http".equalsIgnoreCase(proto) && !"https".equalsIgnoreCase(proto)) return false;
+            String host = u.getHost();
+            if (host == null || host.isEmpty()) return false;
+            String h = host.toLowerCase(java.util.Locale.US);
+            // IPv6 字面量(getHost 已去方括号)
+            if (h.indexOf(':') >= 0) return false;
+            if ("localhost".equals(h) || h.endsWith(".localhost")) return false;
+            if (h.endsWith(".local") || h.endsWith(".internal")) return false;
+            // 非规范 IP 字面量:不含点且全为数字/十六进制字符 → 按内网处理(保守拒绝)
+            if (h.indexOf('.') < 0) {
+                boolean numeric = true;
+                for (int i = 0; i < h.length(); i++) {
+                    char ch = h.charAt(i);
+                    boolean okCh = (ch >= '0' && ch <= '9')
+                            || (i == 0 && (ch == 'x' || ch == 'X'))
+                            || (i > 1 && ((ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+                                    || ch == 'x' || ch == 'X'));
+                    if (!okCh) { numeric = false; break; }
+                }
+                if (numeric) return false;
+            }
+            // 点分十进制私有/回环/链路本地/保留段
+            String[] parts = h.split("\\.");
+            if (parts.length == 4) {
+                try {
+                    int a = Integer.parseInt(parts[0]), b = Integer.parseInt(parts[1]);
+                    if (a == 127 || a == 10 || a == 0 || a >= 224) return false;
+                    if (a == 172 && b >= 16 && b <= 31) return false;
+                    if (a == 192 && b == 168) return false;
+                    if (a == 169 && b == 254) return false;   // 链路本地 / 云元数据
+                } catch (NumberFormatException nfe) {
+                    // 不是纯数字 → 域名,交给上面的规则
+                }
+            }
+            return true;
+        } catch (Throwable t) {
+            return false;   // 解析失败一律拒绝(fail-closed)
+        }
+    }
+
     private static String httpGet(String url) {
         java.net.HttpURLConnection conn = null;
         try {
+            // S8:统一入口校验,任何调用点都绕不过去(含 @require/@resource/@updateURL
+            // 这些 URL 来自脚本元数据、第三方可控的路径)。
+            if (!isPublicHttpUrl(url)) {
+                MainModule.logMsg("[SBPlus] httpGet BLOCKED (non-public target): " + url);
+                return null;
+            }
             java.net.URL u = new java.net.URL(url);
             conn = (java.net.HttpURLConnection) u.openConnection();
             conn.setConnectTimeout(20000);
@@ -23549,6 +23614,13 @@ private static boolean showMediaDialog(String json) {
                         if (isUrlExcluded(m.fileName, url)) continue;
                         if (m.requires != null) {
                             for (String reqUrl : m.requires) {
+                                // S8:内网/非 http(s) 目标不收集(早期拦截,少起无谓的线程与请求)。
+                                // httpGet 入口还有一道兜底,两层都挡。
+                                if (!isPublicHttpUrl(reqUrl)) {
+                                    MainModule.logMsg("[SBPlus] @require skipped (non-public): "
+                                            + m.fileName + " -> " + reqUrl);
+                                    continue;
+                                }
                                 synchronized (requireCache) {
                                     if (requireCache.containsKey(reqUrl)) continue;
                                 }
@@ -23564,6 +23636,12 @@ private static boolean showMediaDialog(String json) {
                                 final String rName = trimmed.substring(0, sp).trim();
                                 final String rUrl = trimmed.substring(sp + 1).trim();
                                 if (rName.isEmpty() || rUrl.isEmpty()) continue;
+                                // S8:同上,@resource 的 URL 也来自脚本元数据。
+                                if (!isPublicHttpUrl(rUrl)) {
+                                    MainModule.logMsg("[SBPlus] @resource skipped (non-public): "
+                                            + m.fileName + " -> " + rName);
+                                    continue;
+                                }
                                 synchronized (resourceCache) {
                                     if (resourceCache.containsKey(rName)) continue;
                                 }
