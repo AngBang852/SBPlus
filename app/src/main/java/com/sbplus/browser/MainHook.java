@@ -21844,6 +21844,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
     }
 
     private static boolean downloadM3u8Internal(String m3u8Url, String title, String reuseId) {
+        // S18:taskId 提到 try 之外 —— 异常路径需要在 catch 里按它找回任务做收尾
+        // (task 对象声明在 try 内,catch 不可见)。
+        String taskIdForCleanup = null;
         try {
             MainModule.logMsg("[SBPlus] downloadM3u8 start: " + m3u8Url);
             // 文件名
@@ -21885,11 +21888,22 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
             task.detail = T("解析中", "Parsing");
             task.partCount = 0;
             task.partTotal = 0;
+            taskIdForCleanup = taskId;   // S18:供 catch 收尾使用
             com.sbplus.browser.SbDownloadManager.post(sAppContext, task);
 
             // 1. 下载主列表
             String masterText = M3u8Helper.httpGetText(m3u8Url);
-            if (masterText == null) { MainModule.logMsg("[SBPlus] m3u8: master download failed"); return false; }
+            if (masterText == null) {
+                // 2026-10-04 修复(审查 S18):早期失败路径必须把任务收尾。
+                // 原实现直接 return false —— 任务既没置 FAILED 也没 post,于是
+                // ①列表里永远停在"解析中";②第 21888 行已经 post 过一条
+                // STATUS_DOWNLOADING 的 **ongoing** 通知,而撤通知只发生在 post() 里
+                // (见 SbDownloadManager.post 的 REMOVED 分支),不再 post 就永远撤不掉
+                // → 通知栏残留一条用户滑不掉的"下载中",直到浏览器进程被杀。
+                failM3u8Task(task, T("主列表下载失败", "Failed to fetch playlist"));
+                MainModule.logMsg("[SBPlus] m3u8: master download failed");
+                return false;
+            }
 
             // 2. 递归解析: 可能是 variant 列表, 取最后一个子列表
             String currentUrl = m3u8Url;
@@ -21909,6 +21923,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 }
             }
             if (segs.isEmpty()) {
+                // S18:同 master 失败 —— 必须收尾,否则任务卡"解析中"+ ongoing 通知撤不掉。
+                failM3u8Task(task, T("未找到分片(可能是加密流或不支持的类型)",
+                        "No segments found (encrypted or unsupported)"));
                 MainModule.logMsg("[SBPlus] m3u8: no segments found");
                 return false;
             }
@@ -21916,6 +21933,11 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
             //     旧逻辑会一直追新分片直到磁盘耗尽,这里直接拒绝下载。
             if (M3u8Helper.isLiveStream(mediaText)) {
                 MainModule.logMsg("[SBPlus] m3u8: live stream detected, refuse to download: " + m3u8Url);
+                // S18:原实现只调 remove(taskId) —— 但 remove 仅加 REMOVED 标记、
+                // 撤通知发生在 post() 的 REMOVED 分支里;不 post 则通知留在栏里。
+                // 这里先置 FAILED + post(撤通知),再 remove(不留记录) —— 直播流是
+                // 用户主动放弃的场景,不需要在列表里留一条失败记录。
+                failM3u8Task(task, T("直播流不支持下载", "Live streams cannot be downloaded"));
                 com.sbplus.browser.SbDownloadManager.remove(taskId);
                 toastShort(T("直播流不支持下载", "Live streams cannot be downloaded"));
                 return false;
@@ -21987,11 +22009,45 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
             int n2 = 1;
             while (tsFinal.exists()) { tsFinal = new java.io.File(dir, baseName + "_" + n2 + ".ts"); n2++; }
             try { tsTmp.renameTo(tsFinal); } catch (Throwable ignored) {}
+            // S18:原实现此处直接 return false,任务停在 STATUS_CONVERTING 且不再 post
+            // → 列表卡"转换中"、ongoing 通知撤不掉。补上收尾(保留 .ts 的说明写进 detail)。
+            failM3u8Task(task, T("转 MP4 失败,已保留 .ts: ", "MP4 conversion failed, kept .ts: ")
+                    + tsFinal.getName());
             MainModule.logMsg("[SBPlus] m3u8 mp4 fail, kept ts: " + tsFinal.getAbsolutePath());
             return false;
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] downloadM3u8 error: " + t);
+            // S18:异常路径同样要收尾,否则任务与通知都会残留。
+            try {
+                com.sbplus.browser.SbDownloadManager.Task ft =
+                        com.sbplus.browser.SbDownloadManager.get(taskIdForCleanup);
+                failM3u8Task(ft, T("下载异常: ", "Download error: ") + t);
+            } catch (Throwable ignored) {}
             return false;
+        }
+    }
+
+    /**
+     * m3u8 任务失败收尾(S18)。
+     *
+     * <p>为什么需要:本方法的三条早期失败路径原先只 {@code return false},而任务在
+     * 21888 行已经以 STATUS_DOWNLOADING **post 过一条 ongoing 通知**。通知的撤销只发生在
+     * {@code SbDownloadManager.post()} 的 REMOVED 分支里 —— 不再 post 就永远撤不掉,
+     * 用户会看到通知栏残留一条滑不掉的"下载中",直到浏览器进程被杀;列表里也会永远
+     * 停在"解析中/转换中"。
+     *
+     * <p>统一收尾:置 FAILED + 写 detail + post(既更新列表状态,又撤掉 ongoing 通知)。
+     * 注意**不** remove —— 与成功路径(21978 附近置 DONE + post)保持同一口径,
+     * 让用户能在下载列表里看到失败记录与原因。
+     */
+    private static void failM3u8Task(com.sbplus.browser.SbDownloadManager.Task task, String detail) {
+        try {
+            if (task == null) return;
+            task.status = com.sbplus.browser.SbDownloadManager.STATUS_FAILED;
+            task.detail = detail == null ? "" : detail;
+            com.sbplus.browser.SbDownloadManager.post(sAppContext, task);
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] failM3u8Task error: " + t);
         }
     }
 
