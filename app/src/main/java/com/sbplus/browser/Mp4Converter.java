@@ -126,8 +126,13 @@ final class Mp4Converter {
     static java.io.File tsToMp4(final java.io.File tsFile, final String baseName,
                                   final com.sbplus.browser.SbDownloadManager.Task task,
                                   final android.content.Context ctx) {
+        // 2026-10-04 修复(审查 S17):extractor 提到外层,由最外层 finally 统一释放。
+        // 原实现把它声明在 try 内、只在"formats 为空"这一条提前返回分支里 release(),
+        // 正常完成与异常路径都不释放 —— MediaExtractor 持有 native 资源与文件 fd,
+        // 批量转换多次后 fd 耗尽,后续 setDataSource 直接失败。
+        android.media.MediaExtractor extractor = null;
         try {
-            final android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+            extractor = new android.media.MediaExtractor();
             extractor.setDataSource(tsFile.getAbsolutePath());
             final int trackCount = extractor.getTrackCount();
             android.media.MediaMuxer muxer = null;
@@ -141,7 +146,8 @@ final class Mp4Converter {
                     try { mime = fmt.getString(android.media.MediaFormat.KEY_MIME); } catch (Throwable ignored) {}
                     MainModule.logMsg("[SBPlus] tsToMp4 track[" + i + "] mime=" + mime);
                 }
-                if (formats.isEmpty()) { extractor.release(); return null; }
+                // S17:此处不再单独 release —— 最外层 finally 会统一释放(二次 release 是未定义行为)
+                if (formats.isEmpty()) { return null; }
                 final java.io.File out = new java.io.File(tsFile.getParentFile(), baseName + ".mp4");
                 muxer = new android.media.MediaMuxer(out.getAbsolutePath(),
                         android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
@@ -293,6 +299,9 @@ final class Mp4Converter {
             MainModule.logMsg("[SBPlus] tsToMp4 error: " + t);
             if (task != null) { task.detail = T("转换失败: ", "Conversion failed: ") + t; task.status = com.sbplus.browser.SbDownloadManager.STATUS_FAILED; com.sbplus.browser.SbDownloadManager.post(ctx, task); }
             return null;
+        } finally {
+            // S17:extractor 的 native 资源与 fd 必须在所有路径上释放。
+            try { if (extractor != null) extractor.release(); } catch (Throwable ignored) {}
         }
     }
 

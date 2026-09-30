@@ -116,6 +116,13 @@ public class SbDownloadManager {
      * 已在途的下载持有的是旧对象的许可,它们结束时调用 release() 会释放到新对象上,
      * 使可用许可数超过容量——并发上限被悄悄突破。这里改为按差值 release/shrink,
      * 保证全程只有一个 Semaphore 实例、许可账目始终守恒。
+     *
+     * <p>2026-10-04 修复(审查 S14):原 catch 分支 `return true` 是**谎报占槽**——
+     * sem.acquire() 抛 InterruptedException 时并未持有任何许可,却告诉调用方"已获得",
+     * 而调用方(6 处)全部忽略返回值、在 finally 里无条件 releaseTaskSlot()
+     * ⇒ 每次中断都让许可净增 1,并发上限被永久击穿(setParallelCapacity 形同虚设)。
+     * 这里改为:失败时返回 false,并通过 ThreadLocal 记账让 releaseTaskSlot()
+     * 知道"本线程这次没拿到槽",从而不误 release。调用方无需改动。
      */
     public static boolean acquireTaskSlot(int capacity) {
         try {
@@ -133,9 +140,23 @@ public class SbDownloadManager {
             // 阻塞等待必须在锁外:占满并发时这里会长时间停住,持锁等待会拖死
             // 同类其它调用(下载列表读取、任务注册、通知刷新)。
             sem.acquire();
+            HELD_SLOT.set(Boolean.TRUE);   // 记账:本线程确实持有许可
             return true;
-        } catch (Throwable t) { return true; }
+        } catch (Throwable t) {
+            // 中断/异常:未获得许可。清记账并如实返回 false,
+            // 使随后的 releaseTaskSlot() 不会凭空归还一个许可。
+            HELD_SLOT.remove();
+            MainModule.logMsg("[SBPlus] acquireTaskSlot interrupted, slot NOT acquired: " + t);
+            return false;
+        }
     }
+
+    /**
+     * 本线程是否持有任务槽。用于让 releaseTaskSlot() 与 acquireTaskSlot() 配对
+     * ——避免"未获得却归还"导致的许可泄漏(S14)。
+     */
+    private static final ThreadLocal<Boolean> HELD_SLOT =
+            new ThreadLocal<Boolean>();
 
     /** 调整容量(调用方须持有 SbDownloadManager 的类锁)。 */
     private static void resizeLocked(int capacity) {
@@ -152,6 +173,11 @@ public class SbDownloadManager {
 
     public static void releaseTaskSlot() {
         try {
+            // 2026-10-04(S14):只归还"本线程确实持有"的许可。
+            // 若 acquireTaskSlot 因中断失败(未持有许可),这里必须什么都不做,
+            // 否则就是凭空增加一个许可 —— 并发上限会被逐次击穿。
+            if (HELD_SLOT.get() == null) return;
+            HELD_SLOT.remove();
             ResizableSemaphore s = taskSem;
             if (s != null) s.release();
         } catch (Throwable ignored) {}
