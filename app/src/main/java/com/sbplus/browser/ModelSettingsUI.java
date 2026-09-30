@@ -226,9 +226,20 @@ public final class ModelSettingsUI {
             box.addView(etKey);
 
             TextView tip = new TextView(act);
+            // 2026-10-04(S7):如实告知 Key 的存放方式。
+            // 本模块跑在宿主浏览器进程内,没有自己的 Application 初始化时机,
+            // 也拿不到 androidx.security 的 EncryptedSharedPreferences(项目未引入该依赖),
+            // 因此 Key 只能以明文存在宿主进程的私有 SharedPreferences(sbplus_config)里。
+            // 不假装做了加密 —— 直接把事实说清楚,由用户决定填什么 Key。
             tip.setText(MainHook.T(
-                    "同一地址只需填一次凭据。",
-                    "Credentials are entered once per base URL."));
+                    "同一地址只需填一次凭据。\n"
+                    + "说明:API Key 以明文保存在浏览器应用的私有配置中"
+                    + "(仅本应用可读,但已 root 的设备或同进程内的其它 Xposed 模块可读),"
+                    + "建议使用限额 Key。",
+                    "Credentials are entered once per base URL.\n"
+                    + "Note: the API key is stored in cleartext in the browser app's private "
+                    + "preferences (readable by this app only, but also by root or other Xposed "
+                    + "modules in the same process). A rate-limited key is recommended."));
             tip.setTextSize(12f);
             tip.setPadding(0, dp(act, 8), 0, 0);
             box.addView(tip);
@@ -258,22 +269,40 @@ public final class ModelSettingsUI {
                                 "The base URL should start with http"));
                         return;
                     }
+                    // Key 必填校验放在 http 警告之前:否则用户填了 http 又漏填 Key 时,
+                    // 会先被 https 警告拦一次、确认后才被告知"请填写 API Key"。
                     if (key.isEmpty()) {
                         toast(act, MainHook.T("请填写 API Key", "Enter the API key"));
                         return;
                     }
-                    while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
-
-                    List<ModelStore.Group> groups = ModelStore.load(act);
-                    ModelStore.Group g = new ModelStore.Group();
-                    g.name = etName.getText().toString().trim();
-                    if (g.name.isEmpty()) g.name = hostOf(base);
-                    g.base = base;
-                    g.key = key;
-                    groups.add(g);
-                    ModelStore.save(act, groups);
-                    dlg.dismiss();
-                    show(act);            // 回到主界面
+                    // 2026-10-04 修复(审查 S7):明文 http 传输会把 Bearer Key 暴露在链路上。
+                    // 这里**不直接拒绝** —— 局域网自建服务(如本机 LM Studio/Ollama)是常见且
+                    // 合理的用法,一律禁用会废掉该场景。改为对非 https 给出明确警告并要求确认,
+                    // 让用户知道自己正在把密钥明文发出去。
+                    if (!base.startsWith("https://")) {
+                        final String fBase = base, fKey = key;
+                        new android.app.AlertDialog.Builder(act)
+                            .setTitle(MainHook.T("该地址不是 HTTPS", "Not HTTPS"))
+                            .setMessage(MainHook.T(
+                                    "接口地址是明文 http,API Key 会在网络上以明文传输,"
+                                    + "可能被同一网络中的其他人截获。\n\n"
+                                    + "如果是本机或局域网自建服务(如 Ollama / LM Studio),可以继续;\n"
+                                    + "如果是公网服务,请改用 https。",
+                                    "This endpoint uses plain http, so your API key will be sent "
+                                    + "in cleartext and can be intercepted on the same network.\n\n"
+                                    + "Fine for a local/LAN service (e.g. Ollama, LM Studio);\n"
+                                    + "use https for any public service."))
+                            .setPositiveButton(MainHook.T("继续使用", "Use anyway"),
+                                    new android.content.DialogInterface.OnClickListener() {
+                                        @Override public void onClick(android.content.DialogInterface d2, int w2) {
+                                            addGroupAndSave(act, fBase, fKey, etName, dlg);
+                                        }
+                                    })
+                            .setNegativeButton(MainHook.T("返回修改", "Go back"), null)
+                            .show();
+                        return;
+                    }
+                    addGroupAndSave(act, base, key, etName, dlg);
                 }
             });
         } catch (Throwable t) {
@@ -281,8 +310,33 @@ public final class ModelSettingsUI {
         }
     }
 
-    // ==================== 添加模型（单个 / 批量） ====================
+    /**
+     * 保存新分组(由「添加分组」对话框调用,含 http 警告确认后的路径)。
+     *
+     * <p>抽成独立方法的原因:非 https 地址需要先弹警告、用户确认后再走同一段保存逻辑,
+     * 避免把保存代码复制两份(复制品最容易各自漂移)。
+     */
+    private static void addGroupAndSave(final Activity act, String base, final String key,
+                                        final android.widget.EditText etName,
+                                        final android.app.Dialog dlg) {
+        try {
+            while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+            List<ModelStore.Group> groups = ModelStore.load(act);
+            ModelStore.Group g = new ModelStore.Group();
+            g.name = etName.getText().toString().trim();
+            if (g.name.isEmpty()) g.name = hostOf(base);
+            g.base = base;
+            g.key = key;
+            groups.add(g);
+            ModelStore.save(act, groups);
+            try { dlg.dismiss(); } catch (Throwable ignored) {}
+            show(act);            // 回到主界面
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] addGroupAndSave error: " + t);
+        }
+    }
 
+    // ==================== 添加模型（单个 / 批量） ====================
     /**
      * 添加模型：先问「从列表选择」还是「手动输入」。
      *

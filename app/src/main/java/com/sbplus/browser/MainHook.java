@@ -3588,7 +3588,13 @@ private static final String[] RANDOM_UAS = new String[]{
             // 导出全部 cookie
             b.setNeutralButton(T("导出", "Export"), new android.content.DialogInterface.OnClickListener() {
                 @Override public void onClick(android.content.DialogInterface d, int which) {
-                    exportAllCookies(act);
+                    // 2026-10-04 修复(审查 S6):导出前必须告知风险。
+                    // 本功能把**全站** Cookie(含 httpOnly 登录态)以明文写入公共下载目录,
+                    // 任何持有存储权限的应用都能读取;而原实现点一下就直接落盘、没有任何提示,
+                    // 用户并不知道自己刚把全部登录凭证摊在了共享存储上。
+                    // 注意:目录与文件名规则**保持不变** —— 导出的用途就是"拿出来看/改/搬到别处",
+                    // 改到 app 私有目录会让这个功能失去意义。这里只补缺失的告知与失败可见性。
+                    confirmExportCookies(act);
                 }
             });
             // 导入 cookie
@@ -3679,17 +3685,57 @@ private static final String[] RANDOM_UAS = new String[]{
     }
 
     /** 导出全部 cookie 为 Netscape cookie.txt, 写到 Downloads/SBPlus/。 */
+    /**
+     * 导出 Cookie 前的风险确认(S6)。
+     *
+     * <p>为什么需要:导出内容是**全站登录态**(含 httpOnly),明文写入公共下载目录
+     * {@code Downloads/SBPlus/},任何持有存储权限的应用都能读取。原实现无任何提示,
+     * 用户不会意识到这一步的后果。功能本身保留(导出就是为了取出使用),
+     * 只在动手前把事实说清楚、并给出"导出后自行清理"的提醒。
+     */
+    private static void confirmExportCookies(final android.app.Activity act) {
+        try {
+            new android.app.AlertDialog.Builder(act)
+                .setTitle(T("导出全部 Cookie?", "Export all cookies?"))
+                .setMessage(T(
+                        "将把**所有网站**的 Cookie(含仅 https 可读的登录态)以明文写入:\n"
+                        + "Downloads/SBPlus/cookies_时间戳.txt\n\n"
+                        + "该目录是公共存储,其它拥有存储权限的应用可以读取这个文件。\n"
+                        + "导出后请尽快使用并删除,不要长期留在手机上或分享出去。",
+                        "This writes cookies for **all sites** (including httpOnly login state) "
+                        + "as plain text to:\nDownloads/SBPlus/cookies_<timestamp>.txt\n\n"
+                        + "That folder is shared storage — any app with storage permission can "
+                        + "read it. Please use the file soon and delete it afterwards."))
+                .setPositiveButton(T("仍要导出", "Export anyway"),
+                        new android.content.DialogInterface.OnClickListener() {
+                            @Override public void onClick(android.content.DialogInterface d, int w) {
+                                exportAllCookies(act);
+                            }
+                        })
+                .setNegativeButton(T("取消", "Cancel"), null)
+                .show();
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] confirmExportCookies err: " + t);
+        }
+    }
+
     private static void exportAllCookies(final android.app.Activity act) {        // 读库可能较慢, 移出主线程
         new Thread(new Runnable() {
             @Override public void run() {
                 final String text = CookieHelper.exportNetscape(act);
                 final int lines = Math.max(0, countLines(text) - 3);
                 String path = null;
+                // 2026-10-04(S6):失败原因要能看见。原实现只 toast "导出失败",
+                // 而 Android 10+ 分区存储下裸写公共目录可能直接抛异常 ——
+                // 用户拿不到任何线索,只能反复重试。这里把异常信息带出来。
+                String err = null;
                 try {
                     java.io.File dir = new java.io.File(
                             android.os.Environment.getExternalStoragePublicDirectory(
                                     android.os.Environment.DIRECTORY_DOWNLOADS), "SBPlus");
-                    if (!dir.exists()) dir.mkdirs();
+                    if (!dir.exists() && !dir.mkdirs()) {
+                        throw new java.io.IOException("cannot create dir: " + dir.getAbsolutePath());
+                    }
                     // 带时间戳, 不覆盖上一次导出
                     java.io.File out = new java.io.File(dir,
                             "cookies_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss",
@@ -3702,14 +3748,17 @@ private static final String[] RANDOM_UAS = new String[]{
                     }
                     path = out.getAbsolutePath();
                 } catch (Throwable t) {
+                    err = String.valueOf(t);
                     MainModule.logMsg("[SBPlus] exportCookies err: " + t);
                 }
                 final String p = path;
                 final int n = lines;
+                final String e = err;
                 toastOnMain(p == null
-                        ? T("导出失败", "Export failed")
-                        : T("已导出 " + n + " 条 Cookie 到 ", "Exported " + n + " cookies to ") + p);
-                MainModule.logMsg("[SBPlus] cookies exported: " + p + " n=" + n);
+                        ? T("导出失败: ", "Export failed: ") + (e == null ? T("未知原因", "unknown") : e)
+                        : T("已导出 " + n + " 条 Cookie 到 ", "Exported " + n + " cookies to ") + p
+                          + T("（请用后删除）", " (delete it after use)"));
+                MainModule.logMsg("[SBPlus] cookies exported: " + p + " n=" + n + " err=" + e);
             }
         }).start();
     }
