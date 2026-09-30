@@ -163,12 +163,23 @@ final class StrUtils {
             String name = slash >= 0 ? u.substring(slash + 1) : u;
             if (!name.isEmpty()) {
                 try { name = java.net.URLDecoder.decode(name, "UTF-8"); } catch (Throwable ignored) {}
+                // 2026-10-04 修复(路径遍历面):URLDecoder.decode 会把 %2F 解成 '/'、
+                // %2E%2E 解成 '..' —— 解码后原样返回时,若调用方拿它直接拼路径,
+                // 就构成目录穿越。这里分两步处理:
+                //   ① 先判断"无意义文件名"(要在消毒之前,否则 sanitizeFileName 的
+                //      空值兜底 "script" 会盖掉原值,判断失真);
+                //   ② 再统一过 sanitizeFileName 消毒(替换 / \ : * ? " < > | 与控制字符)。
                 name = name.replace('\\', '/');
-                // 排除无意义文件名
-                if (!name.equals("/") && !name.isEmpty()
+                if (name.contains("/")) {
+                    // 解码后又出现分隔符 → 只取最后一段,丢弃其前的路径成分
+                    name = name.substring(name.lastIndexOf('/') + 1);
+                }
+                boolean meaningful = !name.equals("/") && !name.isEmpty()
                         && !name.equals("index.html") && !name.equals("index.htm")
-                        && !name.matches("^[0-9]+$")) {
-                    return name;
+                        && !name.matches("^[0-9]+$")
+                        && !name.equals("..") && !name.equals(".");
+                if (meaningful) {
+                    return sanitizeFileName(name);
                 }
             }
         } catch (Throwable ignored) {}
