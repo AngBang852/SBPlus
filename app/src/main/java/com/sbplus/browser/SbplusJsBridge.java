@@ -19,6 +19,9 @@ public class SbplusJsBridge {
     /** 单次 gmXhr 响应体上限：超过即截断。防止脚本拉取超大文件把宿主进程撑爆。 */
     private static final int MAX_RESPONSE_BYTES = 8 * 1024 * 1024;   // 8MB
 
+    /** 重定向最多跟随跳数(S3):超过即失败,避免重定向环与逐跳校验被拖死。 */
+    private static final int MAX_REDIRECTS = 5;
+
     /**
      * 发起请求时所在的 Tab。异步完成后需要用它 evaluateJavaScript 回调页面
      * —— @JavascriptInterface 方法无法直接把异步结果推回 JS,必须经 evaluate。
@@ -278,8 +281,59 @@ public class SbplusJsBridge {
         }
     }
 
+    /**
+     * 请求身份准入(2026-10-04 审查 S2,取向 B)。
+     *
+     * <p>背景:本桥被注入到**任意网页**的 JS 上下文,所以「页面自己写的 JS」与
+     * 「用户安装的油猴脚本」调用的是同一个桥对象,仅凭 Java 侧无法区分二者。
+     * 同步 gmXhr 此前完全不查身份,于是任何页面都能把它当免鉴权的跨域代理用
+     * (任意 method/headers/body,绕过 CORS/CSP)。
+     *
+     * <p>本取向只堵「无脚本身份的调用」,不动脚本能力:
+     * <ul>
+     *   <li>{@code tab == null} —— 模块自有后台 WebView,只跑用户安装的脚本 → 放行;</li>
+     *   <li>带 scriptTag —— 脚本调用(GM_API_JS 会带 __sbplus_current_tag__) → 放行,
+     *       未声明 @connect 的既有脚本照旧可用,能力不变;</li>
+     *   <li>匿名调用(scriptTag 为空) —— 视为页面直调 → 拒绝。</li>
+     * </ul>
+     *
+     * <p>已知边界(与 cookie 门禁同一接受度):主世界注入无法在 JS 层阻止页面伪冒
+     * scriptTag。彻底解决需要隔离世界支持,当前宿主注入 API 不提供;此处先把
+     * 「零成本滥用」堵掉,并把伪冒行为记入日志以便事后追查。
+     */
+    private boolean requestIdentityAllowed(String url, String scriptTag) {
+        try {
+            if (tab == null) return true;                       // 模块自有后台 WebView
+            if (scriptTag != null && !scriptTag.isEmpty()) return true;  // 脚本调用
+            return false;                                        // 匿名页面调用
+        } catch (Throwable t) {
+            return false;                                        // fail-closed
+        }
+    }
+
     /** 判断点分十进制 IPv4 是否属于回环/私有/链路本地/保留段。 */
     private static boolean isPrivateOrLoopbackIpv4(String h) {
+        // 2026-10-04 修复(审查 S3):非点分十进制写法(整数 http://2130706433/、十六进制
+        // 0x7f000001、八进制 0177.0.0.1)在 parts.length != 4 时会走到下面 return false
+        // 被当成"域名"放行,而底层会把它解析成 127.0.0.1 —— 内网防护因此可绕过。
+        // 这里补一层:纯数字/0x 开头且不含点的 host 一律视为 IP 字面量,直接拒绝。
+        try {
+            String s = h == null ? "" : h.trim();
+            if (!s.isEmpty() && s.indexOf('.') < 0) {
+                boolean numeric = true;
+                for (int i = 0; i < s.length(); i++) {
+                    char ch = s.charAt(i);
+                    boolean okCh = (ch >= '0' && ch <= '9')
+                            || (i == 0 && (ch == 'x' || ch == 'X'))
+                            || (i > 1 && (ch == 'x' || ch == 'X' || ch == 'a' || ch == 'b'
+                                    || ch == 'c' || ch == 'd' || ch == 'e' || ch == 'f'
+                                    || ch == 'A' || ch == 'B' || ch == 'C' || ch == 'D'
+                                    || ch == 'E' || ch == 'F'));
+                    if (!okCh) { numeric = false; break; }
+                }
+                if (numeric) return true;   // 整数/十六进制 IP 字面量 → 按内网处理(保守拒绝)
+            }
+        } catch (Throwable ignored) {}
         String[] parts = h.split("\\.");
         if (parts.length != 4) return false;
         int[] o = new int[4];
@@ -305,9 +359,30 @@ public class SbplusJsBridge {
      * 跨域请求。由页面 GM_xmlhttpRequest 通过 window.__sbplus__.gmXhr(...) 调用。
      * @return JSON 字符串：{"status":200,"responseText":"...","error":"..."}
      */
+    /** 旧签名兼容:不带脚本身份。内容 tab 上按「匿名调用」处理(见 requestIdentityAllowed)。 */
     @JavascriptInterface
     public String gmXhr(String method, String url, String headersJson, String data) {
-        return execXhr(method, url, headersJson, data);
+        return gmXhr(method, url, headersJson, data, null);
+    }
+
+    /**
+     * 跨域请求(带脚本身份)。
+     *
+     * <p>2026-10-04 修复(审查 S2,取向 B):同步路径此前完全绕过 @connect 准入链
+     * —— {@code gmXhrAsync} 有 isRequestAllowed + isXhrAllowedForScript 双门禁,而
+     * 同步路径直达 execXhr 只查公网。桥注入在**任意网页**的 JS 上下文里,于是任何
+     * 页面都能把本桥当成免鉴权的跨域代理(可发任意 method/headers/body),绕过 CORS/CSP。
+     *
+     * <p>本取向(B)只堵「无脚本身份的页面调用」:带上 scriptTag 的脚本调用照旧放行
+     * (含未声明 @connect 的既有脚本,能力不变),匿名调用一律拒绝。这样既关掉了
+     * 任意网页的滥用面,又不牺牲油猴脚本的跨域能力。
+     *
+     * @param scriptTag 调用方脚本名(GM_API_JS 传 __sbplus_current_tag__;页面直调时为 null)
+     */
+    @JavascriptInterface
+    public String gmXhr(String method, String url, String headersJson, String data,
+                        String scriptTag) {
+        return execXhr(method, url, headersJson, data, scriptTag);
     }
 
     /**
@@ -355,7 +430,7 @@ public class SbplusJsBridge {
         }
         SbExecutors.net(new Runnable() {
             @Override public void run() {
-                String json = execXhr(verb, fUrl, headersJson, data);
+                String json = execXhr(verb, fUrl, headersJson, data, fTag);
                 MainHook.dispatchXhrResult(dispatchId, id, json);
             }
         });
@@ -364,17 +439,44 @@ public class SbplusJsBridge {
 
     /** 真实 HTTP 执行（同步,在线程池线程上跑）。同步/异步两条路径共用。 */
     private String execXhr(String verb, String url, String headersJson, String data) {
+        return execXhr(verb, url, headersJson, data, null);
+    }
+
+    /**
+     * 真实 HTTP 执行（带脚本身份）。
+     *
+     * <p>2026-10-04 修复(审查 S2/S3):
+     * <ul>
+     *   <li><b>S2</b> —— 本方法是同步/异步两条路径的公共执行点,此前只校验
+     *       {@link #isRequestAllowed}(公网)。把身份门禁下沉到这里,两条路径
+     *       再也绕不过去(异步路径的入口校验保留,作为早失败)。</li>
+     *   <li><b>S3</b> —— 原实现 {@code setInstanceFollowRedirects(true)} 且重定向后
+     *       不复查:公网域名 302 跳到 {@code http://127.0.0.1} 即穿透内网防护。
+     *       改为手动逐跳跟随,每一跳都重新过 {@link #isRequestAllowed}。</li>
+     * </ul>
+     */
+    private String execXhr(String verb, String url, String headersJson, String data,
+                           String scriptTag) {
         try {
             if (!isRequestAllowed(url)) {
                 MainModule.logMsg("[SBPlus] gmXhr BLOCKED(" + verb + "): " + url);
                 return errorJson(-2, "request blocked by SBPlus: target not allowed");
+            }
+            // S2:身份门禁。内容 tab(桥注入在任意网页)上,没有脚本身份的调用一律拒绝
+            // —— 这正是"任意页面把桥当跨域代理"的滥用面。模块自有后台 WebView(tab==null)
+            // 只跑用户安装的脚本,保持原有能力,故放行。
+            if (!requestIdentityAllowed(url, scriptTag)) {
+                MainModule.logMsg("[SBPlus] gmXhr BLOCKED-NOIDENT(" + verb + ") tag=" + scriptTag
+                        + " url=" + url);
+                return errorJson(-3, "request blocked by SBPlus: missing userscript identity");
             }
 
             java.net.HttpURLConnection conn = (java.net.HttpURLConnection)
                     new java.net.URL(url).openConnection();
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(30000);
-            conn.setInstanceFollowRedirects(true);
+            // S3:不自动跟随重定向,由下方循环逐跳校验后再走。
+            conn.setInstanceFollowRedirects(false);
             conn.setRequestMethod(verb);
             conn.setRequestProperty("User-Agent", "Mozilla/5.0 (SBPlus Userscript)");
 
@@ -408,6 +510,56 @@ public class SbplusJsBridge {
             }
 
             int status = conn.getResponseCode();
+            // S3:逐跳跟随重定向,每跳复验目标(拒绝跨向内网/非 http(s) 的跳转)。
+            int hops = 0;
+            while (status >= 300 && status < 400 && hops < MAX_REDIRECTS) {
+                String loc = conn.getHeaderField("Location");
+                try { conn.disconnect(); } catch (Throwable ignored) {}
+                if (loc == null || loc.isEmpty()) {
+                    return errorJson(-4, "redirect without Location");
+                }
+                String next;
+                try {
+                    // 用 base 解析相对跳转(含 //host/path 协议相对形式),避免手工拼接出错
+                    next = new java.net.URL(new java.net.URL(url), loc).toString();
+                } catch (Throwable t) {
+                    return errorJson(-4, "bad redirect target: " + loc);
+                }
+                if (!isRequestAllowed(next)) {
+                    MainModule.logMsg("[SBPlus] gmXhr BLOCKED-REDIR(" + verb + "): " + url
+                            + " -> " + next);
+                    return errorJson(-2, "request blocked by SBPlus: redirect target not allowed");
+                }
+                // 跳转后的目标也要过身份门禁(与首跳同一判据,避免借跳转换域绕过)
+                if (!requestIdentityAllowed(next, scriptTag)) {
+                    return errorJson(-3, "request blocked by SBPlus: redirect needs identity");
+                }
+                url = next;
+                hops++;
+                conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(30000);
+                conn.setInstanceFollowRedirects(false);
+                conn.setRequestMethod(verb);
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (SBPlus Userscript)");
+                if (headersJson != null && !headersJson.isEmpty()) {
+                    try {
+                        org.json.JSONObject h = new org.json.JSONObject(headersJson);
+                        java.util.Iterator<String> it = h.keys();
+                        while (it.hasNext()) {
+                            String k = it.next();
+                            if (k == null || k.isEmpty() || k.indexOf('\n') >= 0 || k.indexOf('\r') >= 0) continue;
+                            conn.setRequestProperty(k, h.optString(k));
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                status = conn.getResponseCode();
+            }
+            if (status >= 300 && status < 400) {
+                try { conn.disconnect(); } catch (Throwable ignored) {}
+                return errorJson(-4, "too many redirects (> " + MAX_REDIRECTS + ")");
+            }
+
             java.io.InputStream is = (status >= 200 && status < 400)
                     ? conn.getInputStream() : conn.getErrorStream();
             String responseText = readStream(is);

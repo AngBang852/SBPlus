@@ -1098,6 +1098,34 @@ private static final String[] RANDOM_UAS = new String[]{
         prefs = MainModule.sInstance.getRemotePreferences(PREFS_NAME);
     }
 
+    /**
+     * 下载设置的统一存储入口。
+     *
+     * <p>2026-10-04 修复(审查 S12):下载相关设置(download_threads / download_parallel /
+     * dl_mode)此前存在**两条互不相通的存储通道**——
+     * <ul>
+     *   <li>UI 侧(主设置页 {@code refresh*Summary/pickDownloadMode/editNumber} 与下载设置
+     *       对话框)读写的都是 {@code ctx.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)},
+     *       即宿主进程的本地文件;</li>
+     *   <li>下载执行侧(20311/20323/20510/20516/20895)读的却是类字段 {@code prefs} =
+     *       {@code MainModule.sInstance.getRemotePreferences(PREFS_NAME)}。</li>
+     * </ul>
+     * 结果是 UI 显示"已保存"、引擎永远跑默认值(线程数/并行数/内置 vs 外部全不生效),
+     * 且 {@code editNumber} 重开对话框时读本地、看起来"记得住",更难被发现。
+     *
+     * <p>本方法把读取方收敛到 remote 通道(引擎实际生效的那一份),异常时退回本地并留日志
+     * ——宁可设置不生效,也不要让设置页打不开。所有下载设置的读写都必须经过这里。
+     */
+    private static android.content.SharedPreferences downloadPrefs(Context ctx) {
+        android.content.SharedPreferences rp = prefs;
+        if (rp != null) return rp;
+        // remote 通道异常(理论上 initPrefs 已保证非空):退回本地并留痕,便于排障。
+        MainModule.logMsg("[SBPlus] downloadPrefs: remote prefs unavailable,"
+                + " falling back to local (download settings will not reach the engine)");
+        if (ctx == null) return null;
+        return ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE);
+    }
+
     static void doHooks(String packageName, ClassLoader classLoader) {
         if (!SBROWSER_PACKAGE.equals(packageName)
                 && !SBROWSER_BETA_PACKAGE.equals(packageName)) {
@@ -14147,7 +14175,9 @@ private static void showUaGroupDialog(final Context ctx) {
 
     private static void refreshModeSummary(Context ctx, Object pref) {
         try {
-            android.content.SharedPreferences sp = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE);
+            // S12:统一走 downloadPrefs()(remote),否则摘要与引擎实际行为不一致。
+            android.content.SharedPreferences sp = downloadPrefs(ctx);
+            if (sp == null) return;
             String mode = sp.getString("dl_mode", "internal");
             callMethod(pref, "setSummary",
                     "internal".equals(mode) ? T("内置下载器(多线程 + 转 MP4)", "Built-in (multi-thread + MP4)") : T("外部下载器(转交第三方)", "External downloader"));
@@ -14155,20 +14185,23 @@ private static void showUaGroupDialog(final Context ctx) {
     }
     private static void refreshThreadsSummary(Context ctx, Object pref) {
         try {
-            android.content.SharedPreferences sp = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE);
+            android.content.SharedPreferences sp = downloadPrefs(ctx);
+            if (sp == null) return;
             callMethod(pref, "setSummary", T("当前 ", "Current ") + sp.getInt("download_threads", 16));
         } catch (Throwable ignored) {}
     }
     private static void refreshParallelSummary(Context ctx, Object pref) {
         try {
-            android.content.SharedPreferences sp = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE);
+            android.content.SharedPreferences sp = downloadPrefs(ctx);
+            if (sp == null) return;
             callMethod(pref, "setSummary", T("当前 ", "Current ") + sp.getInt("download_parallel", 2));
         } catch (Throwable ignored) {}
     }
 
     private static void pickDownloadMode(final Context ctx, final Object[] modePrefRef) {
         try {
-            android.content.SharedPreferences sp = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE);
+            final android.content.SharedPreferences sp = downloadPrefs(ctx);
+            if (sp == null) return;
             final String cur = sp.getString("dl_mode", "internal");
             String[] items = new String[]{ T("内置下载器(多线程+MP4,推荐)", "Built-in (recommended)"),
                                            T("外部下载器(转交第三方)", "External downloader") };
@@ -14178,7 +14211,8 @@ private static void showUaGroupDialog(final Context ctx) {
                 .setSingleChoiceItems(items, idx, new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dlg, int which) {
                         String mode = (which == 1) ? "external" : "internal";
-                        sp.edit().putString("dl_mode", mode).commit();
+                        // S12:写同一份 remote prefs;主线程回调里用 apply 即可。
+                        sp.edit().putString("dl_mode", mode).apply();
                         com.sbplus.browser.SbDownloadManager.setParallelCapacity(sp.getInt("download_parallel", 2));
                         refreshModeSummary(ctx, modePrefRef[0]);
                         dlg.dismiss();
@@ -14192,7 +14226,9 @@ private static void showUaGroupDialog(final Context ctx) {
 
     private static void editNumber(final Context ctx, final String key, final int def, final int min, final int max, final Object pref) {
         try {
-            final android.content.SharedPreferences sp = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE);
+            // S12:线程数/并行数必须写在引擎实际读取的那一份(remote)上。
+            final android.content.SharedPreferences sp = downloadPrefs(ctx);
+            if (sp == null) return;
             final android.widget.EditText et = new android.widget.EditText(ctx);
             et.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
             et.setText(String.valueOf(sp.getInt(key, def)));
@@ -18793,7 +18829,10 @@ private static void showUaGroupDialog(final Context ctx) {
         "      var _tag=(window.__sbplus_current_tag__||'');" +
         "      var _cc=b.gmConnectCheck(_tag,o.url);" +
         "      if(_cc!=='ok'){var p0=JSON.parse(_cc);_finalDispatch(p0);return;}" +
-        "      var j=b.gmXhr(o.method||'GET',o.url,JSON.stringify(o.headers||{}),(o.data==null?null:String(o.data)));var p=JSON.parse(j);_finalDispatch(p);return;}" +
+        // 2026-10-04 修复(审查 S2,取向 B):把脚本身份一并传给同步桥。
+        // Java 侧 execXhr 现在对「无身份的匿名调用」拒绝(堵住任意网页把桥当跨域代理),
+        // 若这里不带 _tag,脚本自己的同步 XHR 会被自己的门禁拦掉。
+        "      var j=b.gmXhr(o.method||'GET',o.url,JSON.stringify(o.headers||{}),(o.data==null?null:String(o.data)),_tag);var p=JSON.parse(j);_finalDispatch(p);return;}" +
         "    try{if(window.__sbplus__.gmLog)window.__sbplus__.gmLog('XHR-FALLBACK '+(o.method||'GET')+' '+o.url);}catch(e){}_syncXhr();" +
         "  }catch(e){try{if(o.onerror)o.onerror();}catch(e2){}}};" +
         "  GM.openInTab=function(url,opt){try{window.open(url,'_blank');}catch(e){}};" +
@@ -20601,7 +20640,7 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 java.io.File mid = new java.io.File(dir, baseName + (isTs ? ".ts" : ".m4s"));
                 int mn = 1;
                 while (mid.exists()) { mid = new java.io.File(dir, baseName + "_" + mn + (isTs ? ".ts" : ".m4s")); mn++; }
-                int _mtT = 16; try { _mtT = sAppContext.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE).getInt("download_threads", 16); } catch (Throwable ignored) {}
+                int _mtT = 16; try { android.content.SharedPreferences _mp = downloadPrefs(sAppContext); if (_mp != null) _mtT = _mp.getInt("download_threads", 16); } catch (Throwable ignored) {}
                 dlFile = httpGetToFileProgressMt(url, task, mid, _mtT);
                 if (dlFile == null) dlFile = httpGetToFileProgress(url, task, mid);   // MT 不适用/失败 → 单线程
             } else {
@@ -20611,7 +20650,7 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 java.io.File target = new java.io.File(dir, baseName + ext);
                 int nn = 1;
                 while (target.exists()) { target = new java.io.File(dir, baseName + "_" + nn + ext); nn++; }
-                int _mtT = 16; try { _mtT = sAppContext.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE).getInt("download_threads", 16); } catch (Throwable ignored) {}
+                int _mtT = 16; try { android.content.SharedPreferences _mp = downloadPrefs(sAppContext); if (_mp != null) _mtT = _mp.getInt("download_threads", 16); } catch (Throwable ignored) {}
                 dlFile = httpGetToFileProgressMt(url, task, target, _mtT);
                 if (dlFile == null) dlFile = httpGetToFileProgress(url, task, target);   // MT 不适用/失败 → 单线程
             }
@@ -21189,11 +21228,18 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
     private static void showDownloadSettingsDialog(final android.app.Activity act) {
         try {
             final android.content.Context ctx = act != null ? act : sAppContext;
-            final android.content.SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME,
-                    android.content.Context.MODE_PRIVATE);
-            int curThreads = prefs.getInt("download_threads", 16);
-            int curParallel = prefs.getInt("download_parallel", 2);
-            String curMode = prefs.getString("dl_mode", "internal"); // internal=内置, external=外部
+            // 2026-10-04 修复(审查 S12):本页必须与下载引擎读**同一份**存储。
+            // 原实现是 ctx.getSharedPreferences(PREFS_NAME, MODE_PRIVATE) —— 那是宿主进程
+            // 本地的 SharedPreferences;而下载执行侧读的是类字段 prefs =
+            // MainModule.sInstance.getRemotePreferences(PREFS_NAME)(见 696/1098,调用点
+            // 20311/20323/20510/20895)。两者是完全不同的存储,于是这里改的线程数/并行数/
+            // 下载方式只写进了"没人读"的那一份:界面提示"已保存",实际行为永远是默认值。
+            // 改为统一走 downloadPrefs()(remote),与读取方同源。
+            final android.content.SharedPreferences sp = downloadPrefs(ctx);
+            if (sp == null) return;
+            int curThreads = sp.getInt("download_threads", 16);
+            int curParallel = sp.getInt("download_parallel", 2);
+            String curMode = sp.getString("dl_mode", "internal"); // internal=内置, external=外部
 
             final android.widget.LinearLayout root = new android.widget.LinearLayout(act);
             root.setOrientation(android.widget.LinearLayout.VERTICAL);
@@ -21257,11 +21303,14 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                             try { parallel = Integer.parseInt(parIn.getText().toString().trim()); } catch (Throwable ignored) {}
                             threads = Math.max(1, Math.min(32, threads));
                             parallel = Math.max(1, Math.min(10, parallel));
-                            prefs.edit()
+                            // 写入同一份 remote prefs(见本方法开头 S12 说明);
+                            // 用 apply() 而非 commit():这是在对话框按钮回调(主线程)里,
+                            // 同步落盘没有必要,而 remote prefs 的 commit 还会经 Binder 走一趟。
+                            sp.edit()
                                 .putString("dl_mode", mode)
                                 .putInt("download_threads", threads)
                                 .putInt("download_parallel", parallel)
-                                .commit();
+                                .apply();
                             com.sbplus.browser.SbDownloadManager.setParallelCapacity(parallel);
                             toastShort(T("已保存下载设置", "Download settings saved"));
                         } catch (Throwable t) { MainModule.logMsg("[SBPlus] save settings: " + t); }
@@ -21995,7 +22044,7 @@ private static boolean showMediaDialog(String json) {
             boolean phPage = false;
             try { phPage = sCurrentUrl != null && sCurrentUrl.contains("pornhub.com"); } catch (Throwable ignored) {}
             if (!phHit && !phPage) {
-                mergeNetworkSniffedUrls(urls, types, titles, vSite);
+                mergeNetworkSniffedUrls(urls, types, titles, vSite, vW, vH, vDur);
             }
             MainModule.logMsg("[SBPlus] DIALOG urls=" + urls.size() + " (json parse)");
             if (urls.isEmpty()) {
@@ -22390,7 +22439,9 @@ private static boolean showMediaDialog(String json) {
                     android.widget.LinearLayout col = new android.widget.LinearLayout(act);
                     col.setOrientation(android.widget.LinearLayout.VERTICAL);
                     col.setPadding(8, 0, 0, 0);
-                    String q0 = StrUtils.videoQuality(urls.get(realIdx), vW.get(realIdx), vH.get(realIdx));
+                    String q0 = StrUtils.videoQuality(urls.get(realIdx),
+                            realIdx < vW.size() ? vW.get(realIdx) : 0,
+                            realIdx < vH.size() ? vH.get(realIdx) : 0);
                     try {
                         String qs = titles.get(realIdx);
                         if (qs == null) qs = "";
@@ -22411,7 +22462,7 @@ private static boolean showMediaDialog(String json) {
                     } catch (Throwable ignoredq) {}
                     final String q = q0;
                     final String ext = StrUtils.parseExt(urls.get(realIdx), types.get(realIdx));
-                    final String dur = StrUtils.fmtDuration(vDur.get(realIdx));
+                    final String dur = StrUtils.fmtDuration(realIdx < vDur.size() ? vDur.get(realIdx) : 0.0);
                     String ti = titles.get(realIdx);
                     String siteTag = (realIdx < vSite.size() && !vSite.get(realIdx).isEmpty()) ? "[" + vSite.get(realIdx) + "] " : "";
                     String titleLine = siteTag + (ti == null || ti.isEmpty() ? StrUtils.fileNameFromUrl(urls.get(realIdx)) : ti);
@@ -22497,7 +22548,7 @@ private static boolean showMediaDialog(String json) {
                     col.setOrientation(android.widget.LinearLayout.VERTICAL);
                     col.setPadding(8, 0, 0, 0);
                     final String ext = StrUtils.parseExt(urls.get(realIdx), types.get(realIdx));
-                    final String dur = StrUtils.fmtDuration(vDur.get(realIdx));
+                    final String dur = StrUtils.fmtDuration(realIdx < vDur.size() ? vDur.get(realIdx) : 0.0);
                     String ti = titles.get(realIdx);
                     String siteTag = (realIdx < vSite.size() && !vSite.get(realIdx).isEmpty()) ? "[" + vSite.get(realIdx) + "] " : "";
                     String titleLine = siteTag + (ti == null || ti.isEmpty() ? StrUtils.fileNameFromUrl(urls.get(realIdx)) : ti);
@@ -25469,7 +25520,9 @@ private static boolean showMediaDialog(String json) {
     /** 从 URL 提取真实文件名(最后路径段, 去 query/fragment, URL解码); 无有效文件名返回短URL。 */
 
     private static void mergeNetworkSniffedUrls(java.util.List<String> urls, java.util.List<String> types, java.util.List<String> titles,
-                                         java.util.List<String> sites) {
+                                         java.util.List<String> sites,
+                                         java.util.List<Integer> vW, java.util.List<Integer> vH,
+                                         java.util.List<Double> vDur) {
         try {
             synchronized (sNetworkSniffedItems) {
                 for (NetSniffItem it : sNetworkSniffedItems) {
@@ -25479,6 +25532,17 @@ private static boolean showMediaDialog(String json) {
                     types.add(it.type);
                     titles.add(ytLabelFor(it.url)); // 网络层: YouTube 可给清晰度标题, 其余留空
                     if (sites != null) sites.add("");
+                    // 2026-10-04 修复(审查 S11):五张平行表必须**同步追加**。
+                    // 原实现只加了 urls/types/titles/sites,没加 vW/vH/vDur —— 于是网络层
+                    // 条目一旦进入列表,这些平行表就比 urls 短,后续 getView 里的
+                    // vW.get(realIdx)/vDur.get(realIdx) 直接越界,异常从 ListView 布局流程
+                    // 抛出、外层 catch 接不住 → 宿主浏览器进程崩溃。
+                    // 触发场景很常见:JS 嗅探为空、仅网络层命中视频的页面。
+                    // 网络层拿不到真实宽高与时长(那是 JS 侧解析出的),按"未知"补 0,
+                    // 与列表里其它未知项的表示保持一致。
+                    if (vW != null) vW.add(0);
+                    if (vH != null) vH.add(0);
+                    if (vDur != null) vDur.add(0.0);
                 }
                 // 清空收集列表,为下次嗅探准备
                 sNetworkSniffedItems.clear();

@@ -65,11 +65,38 @@ final class SbExecutors {
     static void net(Runnable r) { exec(NET, r); }
 
     private static void exec(java.util.concurrent.ThreadPoolExecutor p, Runnable r) {
+        // 2026-10-04 修复(审查 S13):必须用 guard 包住任务体本身。
+        // 原实现只 try 了 p.execute(r) —— 那只覆盖"提交"动作;任务体 r.run() 抛出的
+        // RuntimeException/Error 会直达池线程,而 Android 的默认 UncaughtExceptionHandler
+        // 收到未捕获异常时会**杀死整个进程**。本模块跑在三星浏览器进程里,于是任何一个
+        // 下载/嗅探/预取任务抛异常,用户看到的就是浏览器闪退,且日志里只有模块的名字。
+        // 这里统一在提交点包一层:池入口(bg/heavy/net)与下面的独立线程兜底都自动受保护,
+        // 不必逐个调用点去补 try。
+        final Runnable guarded = guard(r);
         try {
-            p.execute(r);
+            p.execute(guarded);
         } catch (Throwable t) {
             // 队列饱和的极端兜底:退回旧行为(独立线程),任务不丢。
-            try { new Thread(r).start(); } catch (Throwable ignored) {}
+            // 兜底线程同样跑 guarded —— 否则"最该保护的异常路径"反而没有保护。
+            try { new Thread(guarded).start(); } catch (Throwable ignored) {}
         }
+    }
+
+    /** 把任务体包成"异常绝不逃逸"的 Runnable:失败只记日志,不牵连宿主进程。 */
+    private static Runnable guard(final Runnable r) {
+        if (r == null) return null;
+        return new Runnable() {
+            @Override public void run() {
+                try {
+                    r.run();
+                } catch (Throwable t) {
+                    // 与 MainHook 的日志门面一致:走 MainModule(转 LogWriter/logcat)。
+                    // 日志本身再抛也不能让异常逃出去,故再套一层。
+                    try {
+                        MainModule.logMsg("[SBPlus] pool task failed: " + t);
+                    } catch (Throwable ignored) {}
+                }
+            }
+        };
     }
 }
