@@ -41,64 +41,35 @@ final class HookRegistry {
     private static final Object LOCK = new Object();
 
     /**
-     * 已被撤销的功能名。
+     * 已被用户关闭的功能名（**仅本进程内有效，不持久化**）。
      *
-     * <p>2026-10-04：改为**持久化 + 内存缓存**双层。
-     * 起初只用内存集合，但那样"用户关掉功能 → 重启浏览器 → 功能又活了" ——
-     * 与用户的选择相反，是明显的缺陷。撤销状态必须跨进程重启保持。
+     * <p><b>2026-10-04 推倒重做：移除持久化</b>
      *
-     * <p>持久化介质用浏览器进程自己的 prefs（与 {@code processPrefs} 同一份），
-     * 因为撤销判断发生在<b>浏览器进程</b>里（hook 注册期），必须用该进程可读的存储。
-     * 写成逗号分隔的功能名列表（功能名只含小写字母与连字符，无歧义）。
+     * <p>此前这里会把"已撤销功能"写进 prefs，并让 {@code safeFeature} 在注册时据此
+     * 跳过 —— 结果与"用户开关"构成**两套真相源**。任何一步同步失败
+     * （例如 persistRevoked 在 Context 未就绪时静默 return）就会永久不一致，
+     * <b>且重启也修不回来（错的正是持久化数据）</b>。实测表现就是：
+     * 用户关掉功能再打开、甚至重启浏览器后功能仍不工作。
+     *
+     * <p>现在**唯一真相源是用户开关本身**（KEY_ENABLE_UA 等），hook 注册时直接读它。
+     * 本集合只用于**回答"本进程内这个功能现在是不是被关了"**（供
+     * {@code isFeatureAvailable} 与直通替换判断），**不落盘、不参与注册决策**，
+     * 因此不可能与开关长期不一致。
      */
     private static final java.util.Set<String> REVOKED = new java.util.HashSet<String>();
 
-    private static final String PREFS_NAME = "sbplus_config";
-    private static final String KEY_REVOKED = "sbplus_revoked_features";
-
-    /** 持久化上下文（由 MainHook 在捕获到 Application Context 后注入）。 */
-    private static volatile android.content.Context sPrefsCtx;
-
-    /** 从 prefs 载入已撤销集合（进程启动时调一次）。 */
+    /** 兼容旧调用：不再从 prefs 载入（已无持久化）。保留空实现避免调用点报错。 */
     static void loadRevoked(android.content.Context ctx) {
-        if (ctx == null) return;
         sPrefsCtx = ctx;
-        try {
-            String raw = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-                    .getString(KEY_REVOKED, "");
-            synchronized (LOCK) {
-                REVOKED.clear();
-                if (raw != null && !raw.isEmpty()) {
-                    for (String s : raw.split(",")) {
-                        if (!s.isEmpty()) REVOKED.add(s);
-                    }
-                }
-            }
-            if (!REVOKED.isEmpty()) {
-                android.util.Log.i("SBPlus", "loaded revoked features: " + REVOKED);
-            }
-        } catch (Throwable t) {
-            android.util.Log.w("SBPlus", "loadRevoked failed", t);
-        }
+        // 不读 prefs —— 见 REVOKED 的说明：唯一真相源是用户开关。
     }
 
-    /** 把已撤销集合写回 prefs。 */
+    /** 持久化上下文（仅用于其它用途保留；本类已不再写盘）。 */
+    private static volatile android.content.Context sPrefsCtx;
+
+    /** 兼容旧调用：已无持久化，空实现。 */
     private static void persistRevoked() {
-        android.content.Context ctx = sPrefsCtx;
-        if (ctx == null) return;   // 上下文未就绪：仅内存生效，下次启动会丢（可接受降级）
-        try {
-            StringBuilder sb = new StringBuilder();
-            synchronized (LOCK) {
-                for (String s : REVOKED) {
-                    if (sb.length() > 0) sb.append(",");
-                    sb.append(s);
-                }
-            }
-            ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-                    .edit().putString(KEY_REVOKED, sb.toString()).apply();
-        } catch (Throwable t) {
-            android.util.Log.w("SBPlus", "persistRevoked failed", t);
-        }
+        // 有意为空：见 REVOKED 的说明。
     }
 
     /**

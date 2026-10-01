@@ -459,8 +459,8 @@ public class MainHook {
             }
             LogWriter.init(ctx);
             LogWriter.log("core", "hot reload: Application Context recovered");
-            HookRegistry.loadRevoked(ctx);
-            applyRevokedFeatures();
+            // 注:不再需要 loadRevoked/applyRevokedFeatures —— 注册时已按用户开关决定
+            // （唯一真相源），热重载后重跑 doHooks 自然就是正确状态。
             try { registerDownloadListReceiver(ctx); } catch (Throwable ignored) {}
             MainModule.logMsg("[SBPlus] reload: process state restored");
         } catch (Throwable t) {
@@ -1452,6 +1452,10 @@ private static final String[] RANDOM_UAS = new String[]{
         // 每个功能的 hook 注册都用 safeFeature 包一层:任何一项因浏览器更新而找不到
         // 类/方法(或注册时抛任何 Throwable),只记录为该功能"不可用",绝不阻断后续功能,
         // 也绝不把异常抛回浏览器进程导致崩溃。
+        //
+        // 2026-10-04 推倒重做:有用户开关的功能，把开关判定直接传进来 ——
+        // 关了就不注册、开了就注册，**以开关为唯一真相源**（详见 safeFeature 说明）。
+        // 无开关的常驻功能用两参重载。
         safeFeature("download-pre-request", () -> hookPreDownloadRequestService(classLoader));
         safeFeature("download-started",     () -> hookOnDownloadStarted(classLoader));
         safeFeature("settings-menu",        () -> hookSettingsMenu(classLoader));
@@ -1460,17 +1464,28 @@ private static final String[] RANDOM_UAS = new String[]{
         safeFeature("back-press",           () -> hookBackPress(classLoader));
         safeFeature("navigate-up",          () -> hookNavigateUp(classLoader));
         safeFeature("radio-group",          () -> hookRadioGroup(classLoader));
-        safeFeature("more-menu-grid",       () -> hookMoreMenuGrid(classLoader));
-        safeFeature("region-lock",          () -> hookRegionLock(classLoader));
-        safeFeature("region-touch-scroll",  () -> hookRegionTouchScroll(classLoader));
-        safeFeature("ua-override",          () -> hookUaOverride(classLoader));
-        safeFeature("ua-per-site",          () -> hookPerSiteUa(classLoader));
-        safeFeature("clean-settings",       () -> hookCleanSettings(classLoader));
-        safeFeature("block-update",         () -> hookBlockUpdate(classLoader));
-        safeFeature("video-background",     () -> hookVideoBackground(classLoader));
-        safeFeature("userscript",           () -> hookUserscript(classLoader));
-        safeFeature("userscript-toolbar",   () -> hookUserscriptToolbar(classLoader));
-        safeFeature("network-sniff",        () -> hookNetworkSniff(classLoader));
+        safeFeature("more-menu-grid",       MainHook::isGridMenuEnabled,
+                                            () -> hookMoreMenuGrid(classLoader));
+        safeFeature("region-lock",          MainHook::isRegionLockEnabled,
+                                            () -> hookRegionLock(classLoader));
+        safeFeature("region-touch-scroll",  MainHook::isRegionLockEnabled,
+                                            () -> hookRegionTouchScroll(classLoader));
+        safeFeature("ua-override",          MainHook::isUaEnabled,
+                                            () -> hookUaOverride(classLoader));
+        safeFeature("ua-per-site",          MainHook::isUaPerSiteEnabled,
+                                            () -> hookPerSiteUa(classLoader));
+        safeFeature("clean-settings",       MainHook::isCleanSettingsEnabled,
+                                            () -> hookCleanSettings(classLoader));
+        safeFeature("block-update",         MainHook::isBlockUpdateEnabled,
+                                            () -> hookBlockUpdate(classLoader));
+        safeFeature("video-background",     MainHook::isVideoBgEnabled,
+                                            () -> hookVideoBackground(classLoader));
+        safeFeature("userscript",           MainHook::isUserscriptEnabled,
+                                            () -> hookUserscript(classLoader));
+        safeFeature("userscript-toolbar",   MainHook::isUserscriptEnabled,
+                                            () -> hookUserscriptToolbar(classLoader));
+        safeFeature("network-sniff",        MainHook::isSniffEnabled,
+                                            () -> hookNetworkSniff(classLoader));
         safeFeature("theme",                () -> hookThemeHook(classLoader));
         safeFeature("global-font",          () -> hookGlobalFont(classLoader));
         safeFeature("debug-localize",       () -> hookDebugSettingsLocalize(classLoader));
@@ -1482,23 +1497,48 @@ private static final String[] RANDOM_UAS = new String[]{
     private static final java.util.LinkedHashMap<String, Boolean> sFeatureStatus =
             new java.util.LinkedHashMap<String, Boolean>();
 
-    /** 注册一个功能的 hook,吞掉一切 Throwable(含 NoClassDefFoundError / NoSuchMethodError),
+    /**
+     * 注册一个功能的 hook,吞掉一切 Throwable(含 NoClassDefFoundError / NoSuchMethodError),
      *  保证单个功能失效不影响其它功能,也不会让浏览器进程崩溃。
      *
-     *  <p>2026-10-04：同时作为 hook 的**功能归组边界** —— 注册期间通过
-     *  {@link HookRegistry#beginFeature} 标记当前功能名，各注册入口据此把
-     *  {@code HookHandle} 记到该功能名下。这样 {@link HookRegistry#revokeFeature}
-     *  就能"按功能"撤销全部 hook，实现**关闭功能无需重启浏览器**。
+     *  <p><b>2026-10-04 推倒重做:以「用户开关」为唯一真相源</b>
      *
-     *  <p>若该功能此前已被撤销（用户在设置里关掉了它），这里**跳过注册** ——
-     *  否则浏览器进程重启后会把它重新激活，与用户的选择相反。 */
-    private static void safeFeature(String name, Runnable register) {
-        boolean ok = false;
-        if (HookRegistry.isRevoked(name)) {
-            MainModule.logMsg("[SBPlus] feature SKIPPED (revoked by user) '" + name + "'");
-            synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
-            return;
+     *  <p>此前为了支持"关功能免重启",引入了一套 <b>REVOKED 集合</b>（也持久化到 prefs）
+     *  来表示"用户已关闭的功能"，hook 注册时看它决定是否跳过。结果出现**两套状态**：
+     *  用户开关（真相 A）与 REVOKED（真相 B）。任何一步同步失败
+     *  （例如 persistRevoked 在 Context 未就绪时静默 return）就会永久不一致 ——
+     *  <b>而且重启也修不回来，因为错的正是持久化数据</b>。实测就是这样：
+     *  用户关掉功能再打开、甚至重启浏览器后功能仍然不工作。
+     *
+     *  <p>现在改为**只有一个真相源**：hook 注册时直接问"用户开关是不是开着的"。
+     *  关了就不注册、开了就注册，**重启天然一致**，不需要任何"已撤销"记录。
+     *  关闭功能时仍做"直通替换"让本进程即时生效，但**不再写任何额外状态**。
+     *
+     *  @param name     功能标识（用于状态记录与菜单"(失效)"标记）
+     *  @param enabled  该功能是否被用户启用；返回 false 则**完全不注册**。
+     *                  传 null 表示该功能没有用户开关（常驻功能），总是注册。
+     *  @param register 实际注册动作
+     */
+    private static void safeFeature(String name, java.util.function.BooleanSupplier enabled,
+                                    Runnable register) {
+        // ① 用户没开这个功能 -> 不注册。这是唯一真相源。
+        if (enabled != null) {
+            boolean on;
+            try {
+                on = enabled.getAsBoolean();
+            } catch (Throwable t) {
+                // 读开关失败：保守按"关闭"处理，避免在用户明确关闭时仍然挂上 hook。
+                MainModule.logMsg("[SBPlus] feature '" + name + "' toggle read failed, skip: " + t);
+                synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
+                return;
+            }
+            if (!on) {
+                MainModule.logMsg("[SBPlus] feature SKIPPED (user disabled) '" + name + "'");
+                synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
+                return;
+            }
         }
+        boolean ok = false;
         HookRegistry.beginFeature(name);
         try {
             register.run();
@@ -1511,6 +1551,11 @@ private static final String[] RANDOM_UAS = new String[]{
             HookRegistry.endFeature();
         }
         synchronized (sFeatureStatus) { sFeatureStatus.put(name, ok); }
+    }
+
+    /** 兼容重载：无用户开关的常驻功能。 */
+    private static void safeFeature(String name, Runnable register) {
+        safeFeature(name, null, register);
     }
 
     /**
@@ -1564,31 +1609,6 @@ private static final String[] RANDOM_UAS = new String[]{
                 sFeatureStatus.put(name, true);
                 MainModule.logMsg("[SBPlus] feature re-enabled by user '" + name + "'");
             }
-        }
-    }
-
-    /**
-     * 把"用户已关闭的功能"落到实处（2026-10-04 新增）。
-     *
-     * <p>为什么需要单独一步：{@code doHooks} 在类加载期就完成了全部 hook 注册，
-     * 而"已撤销功能"列表要到 Application.onCreate 才能读到（需要 Context 才能访问 prefs）。
-     * 即 safeFeature 里那句"跳过已撤销功能"对**首次启动**根本来不及生效。
-     * 因此载入列表后必须再撤销一次已注册的那些。
-     *
-     * <p>幂等：{@code revokeFeature} 对已撤销的功能返回 0，重复调用无副作用。
-     */
-    private static void applyRevokedFeatures() {
-        try {
-            java.util.Map<String, Integer> snap = HookRegistry.snapshot();
-            for (String feature : snap.keySet()) {
-                if (HookRegistry.isRevoked(feature)) {
-                    int n = HookRegistry.revokeFeature(feature);
-                    MainModule.logMsg("[SBPlus] revoked feature '" + feature
-                            + "' on startup (user disabled it), hooks=" + n);
-                }
-            }
-        } catch (Throwable t) {
-            MainModule.logMsg("[SBPlus] applyRevokedFeatures error: " + t);
         }
     }
 
@@ -2937,16 +2957,11 @@ private static final String[] RANDOM_UAS = new String[]{
                             sAppContext = (Context) param.thisObject;
                             LogWriter.init(sAppContext);
                             LogWriter.log("core", "captured Application Context: " + sAppContext);
-                            // 2026-10-04：载入"已被用户运行时关闭的功能"列表，并立即撤销。
-                            //
-                            // **时序说明（重要，勿想当然）**：doHooks 在**类加载期**就把所有
-                            // safeFeature 注册完了，而本回调（SBrowserApplication.onCreate）
-                            // 晚于它执行。也就是说此刻 hook 早已挂上，safeFeature 里那句
-                            // "跳过已撤销功能"根本来不及生效。
-                            // 因此这里不能只载入 —— 必须载入后**把已注册的那些也撤掉**，
-                            // 才能让"用户上次关掉的功能"在本次启动中真正保持关闭。
-                            HookRegistry.loadRevoked(sAppContext);
-                            applyRevokedFeatures();
+                            // 2026-10-04 推倒重做后不再需要在这里载入/应用"已撤销功能"：
+                            // hook 注册发生在类加载期，而那时 safeFeature 已经**直接读了
+                            // 用户开关**决定是否注册 —— 开关本身就是唯一真相源，
+                            // 不存在"注册完再纠正"的需求。
+                            HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                             // 2026-10-04：自检 —— 验证 currentAppContext() 的反射路径可用。
                             // 热重载后新一代拿不到 Context（生命周期回调不重放），
                             // 唯一出路就是这条反射路径；若它在真机上不可用，
@@ -25949,6 +25964,38 @@ private static boolean showMediaDialog(String json) {
     }
 
     /**
+     * 按 URL 从 Chromium 引擎取 Cookie 头（2026-10-04 新增）。
+     *
+     * <p>用于"外部下载器需要登录才能下载"的场景：{@code TerraceDownloadInfo.getCookie()}
+     * 多数情况下为空，而浏览器原生下载器靠 Chromium 网络栈自动带 Cookie。
+     * 外部下载器只能从 Intent 拿，故必须由本模块主动补上。
+     *
+     * <p>为什么用 {@link android.webkit.CookieManager} 而不是读 Cookies 数据库：
+     * 审查时实测过真实库 —— {@code value} 列 30/30 全为空、{@code encrypted_value}
+     * 全是 {@code v10} 前缀（系统密钥加密）。本模块无法解密，而 CookieManager 是
+     * Chromium 引擎自身的接口，它返回的**已是明文**。
+     *
+     * <p>线程与时机：CookieManager.getCookie 可在任意线程调用（内部走引擎），
+     * 但**必须在主线程之外**小心 —— 本方法在下载 hook 回调里执行，该回调本就不在
+     * 主线程（下载服务线程）。异常一律吞掉并返回 null，不影响不需要登录的下载。
+     *
+     * @return {@code "k=v; k2=v2"} 形式的 Cookie 头；取不到返回 null
+     */
+    private static String cookieHeaderForUrl(String url) {
+        if (url == null || url.isEmpty()) return null;
+        try {
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            if (cm == null) return null;
+            String c = cm.getCookie(url);
+            if (c == null || c.isEmpty()) return null;
+            return c;
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] cookieHeaderForUrl failed: " + t);
+            return null;
+        }
+    }
+
+    /**
      * Reflectively extract download metadata from TerraceDownloadInfo.
      */
     private static DownloadMeta extractMeta(Object info) {
@@ -25959,7 +26006,47 @@ private static boolean showMediaDialog(String json) {
                 meta.url = safeStr(callMethod(info, "getOriginalUrl"));
             }
             meta.cookie = safeStr(callMethod(info, "getCookie"));
+            // 2026-10-04 修复(主人反馈"用外部下载器下载需要登录的文件提示客户端错误,需要登录"):
+            //
+            // TerraceDownloadInfo.getCookie() 在**多数下载路径下是空的** —— 实测只有从
+            // 网页表单/特定入口触发的下载才会被填充。而浏览器原生下载器之所以能下,
+            // 是因为它走 Chromium 网络栈、**自动带上 Cookie**;外部下载器只拿到一个
+            // Intent,拿不到浏览器的会话 → 服务器返回登录页 → 下载器报"需要登录"。
+            //
+            // 因此这里补一层兜底:getCookie() 为空时,主动用 android.webkit.CookieManager
+            // 按目标 URL 取 Cookie。CookieManager 是 Chromium 引擎自身的 Cookie 存储,
+            // 它**已解密**(与审查时实测的"Cookies 库 value 列全空、encrypted_value 是 v10
+            // 加密"不同 —— 引擎层拿到的是明文),因此这是唯一可靠的读取途径。
+            //
+            // 注意:本模块跑在浏览器进程内,CookieManager 可用;若返回 null(无 Cookie /
+            // 引擎未就绪),保持原值不动,不影响不需要登录的下载。
+            if (meta.cookie == null || meta.cookie.isEmpty()) {
+                String fromEngine = cookieHeaderForUrl(meta.url);
+                if (fromEngine != null && !fromEngine.isEmpty()) {
+                    meta.cookie = fromEngine;
+                    MainModule.logMsg("[SBPlus] cookie filled from CookieManager, len="
+                            + fromEngine.length());
+                }
+            }
             meta.userAgent = safeStr(callMethod(info, "getUserAgent"));
+            // 2026-10-04：UA 同理兜底。部分站点按 UA 判定客户端，UA 为空会被当成
+            // 异常请求拒掉（与 Cookie 缺失叠加时更明显）。浏览器当前的 UA 就是
+            // 用户实际使用的那个，直接取来用即可。
+            if (meta.userAgent == null || meta.userAgent.isEmpty()) {
+                try {
+                    String ua = android.webkit.WebSettings.getDefaultUserAgent(sAppContext);
+                    if (ua != null && !ua.isEmpty()) meta.userAgent = ua;
+                } catch (Throwable ignored) {}
+            }
+            // Referer 兜底：防盗链站点会校验 Referer，缺失则返回 403。
+            // 用目标 URL 自身作为 Referer 是最安全的近似（同源），
+            // 比留空更可能通过校验，也不会泄露其它站点的地址。
+            if (meta.referrer == null || meta.referrer.isEmpty()) {
+                try {
+                    java.net.URL u = new java.net.URL(meta.url);
+                    meta.referrer = u.getProtocol() + "://" + u.getHost() + "/";
+                } catch (Throwable ignored) {}
+            }
             meta.fileName = safeStr(callMethod(info, "getFileName"));
             meta.referrer = safeStr(callMethod(info, "getReferrer"));
             meta.mimeType = safeStr(callMethod(info, "getMimeType"));
