@@ -810,10 +810,10 @@ private static final String[] RANDOM_UAS = new String[]{
                 if (param.getResult() != RESULT_UNSET) {
                     result = param.getResult();
                 } else {
-                    // 2026-09-20 S2 修复:把 hook 内对 param.args 的修改回写 chain
-                    // (此前只把 chain.getArgs().toArray() 快照给 param.args,改动从不生效)
-                    syncArgsToChain(chain.getArgs(), param.args);
-                    result = chain.proceed();
+                    // 2026-10-04 真机修正:改用带参放行接口(见 proceedWithArgs 说明)。
+                    // 原 syncArgsToChain 假设 getArgs() 是活视图,真机上返回不可变列表,
+                    // 回写必然失败 → 改参 hook 一直空转。
+                    result = proceedWithArgs(chain, param.args);
                     param.setResult(result);
                 }
                 invokeHookAfter(callback, param);
@@ -836,9 +836,8 @@ private static final String[] RANDOM_UAS = new String[]{
             if (param.getResult() != RESULT_UNSET) {
                 result = param.getResult();
             } else {
-                // 2026-09-20 S2 修复:同 findAndHookMethod,回写 param.args 到 chain
-                syncArgsToChain(chain.getArgs(), param.args);
-                result = chain.proceed();
+                // 2026-10-04 真机修正:同 findAndHookMethod,改用带参放行接口
+                result = proceedWithArgs(chain, param.args);
                 param.setResult(result);
             }
             invokeHookAfter(callback, param);
@@ -849,27 +848,40 @@ private static final String[] RANDOM_UAS = new String[]{
 
 
     /**
-     * 2026-09-20 S2 修复:把 hook 内对 param.args 的修改回写到 chain。
-     * 此前 param.args 只是 chain.getArgs().toArray() 的快照,改动从不生效——
-     * 所有「改参再放行」类 hook(如 AboutFragment.updateViews 屏蔽更新提示、
-     * callAppStore 改参)都在静默空转,setArgs 公开 API 永不生效。
-     * libxposed 的 getArgs() 返回实参的活视图,set() 直接生效;若框架实现
-     * 返回副本,这里只记一次日志降级,不抛出(hook 主流程不受影响)。
+     * 「改参再放行」的统一执行路径。
+     *
+     * <p>2026-10-04 真机验证修正:第三轮审计的 S2 修复方向正确(要让 param.args 的
+     * 修改真正生效),但实现走错了路 —— 它假设 {@code chain.getArgs()} 返回的是
+     * 实参的**活视图**,用 {@code live.set(i, v)} 回写。装机实测日志给出反证:
+     * <pre>args write-back unsupported by chain impl: java.lang.UnsupportedOperationException</pre>
+     * 即 libxposed 的 {@code getArgs()} 返回**不可变列表**,set() 必然抛异常(被降级
+     * 日志吞掉),所有「改参」hook 在真机上仍然空转。
+     *
+     * <p>正确做法:API 本身提供了带参放行接口
+     * {@code Chain.proceed(Object[] args)}(见 libxposed-api-102 的 Chain 接口)。
+     * 这里改为:参数有变化时调用 {@code proceed(新数组)},无变化时走原来的
+     * {@code proceed()} —— 既让改参生效,又不改变未改参路径的行为。
+     *
+     * @return 宿主方法返回值
      */
-    private static volatile boolean sArgsSyncWarned = false;
-
-    private static void syncArgsToChain(java.util.List<Object> live, Object[] args) {
-        if (live == null || args == null || live.size() != args.length) return;
+    private static Object proceedWithArgs(io.github.libxposed.api.XposedInterface.Chain chain,
+                                          Object[] args) throws Throwable {
+        if (chain == null) throw new IllegalStateException("null chain");
+        if (args == null) return chain.proceed();
+        // 判断是否真的改过参:与快照比较,没变就走无参 proceed(避免无谓的数组拷贝)
         try {
-            for (int i = 0; i < args.length; i++) {
-                if (!java.util.Objects.equals(live.get(i), args[i])) live.set(i, args[i]);
+            java.util.List<Object> live = chain.getArgs();
+            if (live != null && live.size() == args.length) {
+                boolean changed = false;
+                for (int i = 0; i < args.length; i++) {
+                    if (!java.util.Objects.equals(live.get(i), args[i])) { changed = true; break; }
+                }
+                if (!changed) return chain.proceed();
             }
-        } catch (Throwable t) {
-            if (!sArgsSyncWarned) {
-                sArgsSyncWarned = true;
-                MainModule.logMsg("[SBPlus] args write-back unsupported by chain impl: " + t);
-            }
+        } catch (Throwable ignored) {
+            // getArgs 不可用/不可读时,保守按"已改参"处理,直接带参放行
         }
+        return chain.proceed(args);
     }
 
     public static Object callMethod(Object obj, String name, Object... args) {
@@ -1058,6 +1070,70 @@ private static final String[] RANDOM_UAS = new String[]{
         }
     }
 
+    /**
+     * 与 {@link #findAndHookMethod(Class, String, Object...)} 相同,但会**沿类层级向上查找**
+     * 目标方法(本类找不到就找父类)。
+     *
+     * <p>2026-10-04 新增,依据真机日志:
+     * <pre>
+     * [SBPlus] hook onLayout failed: NoSuchMethodException:
+     *     com.sec.android.app.sbrowser.omnibox.LocationBarButtonLayout.onLayout [boolean,int,int,int,int]
+     * [SBPlus] onDestroyView hook failed(ignored): NoSuchMethodException:
+     *     com.sec.android.app.sbrowser.common.settings.PreferenceFragmentCustom.onDestroyView []
+     * </pre>
+     * 这两个方法都定义在**父类**(ViewGroup.onLayout / Fragment.onDestroyView),而
+     * {@code getDeclaredMethod} 只查本类声明的方法,于是必然找不到 —— 原代码的 try/catch
+     * 把异常吞成一行日志,功能静默失效(工具栏图标不会随布局变化同步、地区页状态不重置)。
+     *
+     * <p>为什么新增方法而不直接改 findAndHookMethod:后者有 100+ 个调用点,把"查父类"
+     * 变成全局默认行为会改变它们全部的行为(例如某些 hook 刻意只针对子类覆写版本)。
+     * 需要向上查找的调用点显式用本方法,影响面可控。
+     */
+    public static void findAndHookMethodInHierarchy(Class<?> clazz, String methodName, Object... args) {
+        try {
+            XC_MethodHook callback = (XC_MethodHook) args[args.length - 1];
+            Class<?>[] paramTypes = new Class<?>[args.length - 1];
+            for (int i = 0; i < paramTypes.length; i++) paramTypes[i] = (Class<?>) args[i];
+            java.lang.reflect.Method m = null;
+            for (Class<?> k = clazz; k != null && m == null; k = k.getSuperclass()) {
+                try {
+                    m = k.getDeclaredMethod(methodName, paramTypes);
+                    if (m != null) {
+                        MainModule.logMsg("[SBPlus] resolved " + methodName + " on "
+                                + k.getName() + " (hierarchy lookup)");
+                    }
+                } catch (NoSuchMethodException ignored) {}
+            }
+            if (m == null) {
+                throw new NoSuchMethodException(clazz.getName() + "." + methodName);
+            }
+            m.setAccessible(true);
+            // lambda 捕获要求 effectively-final,故用 final 变量承接(与 findAndHookMethod 一致)
+            final java.lang.reflect.Method fm = m;
+            MainModule.sInstance.hook(fm).intercept(chain -> {
+                MethodHookParam param = newMethodHookParam();
+                param.method = fm;
+                param.thisObject = chain.getThisObject();
+                param.args = chain.getArgs().toArray();
+                param.setResult(RESULT_UNSET);
+                invokeHookBefore(callback, param);
+                if (param.hasThrowable()) throw param.getThrowable();
+                Object result;
+                if (param.getResult() != RESULT_UNSET) {
+                    result = param.getResult();
+                } else {
+                    result = proceedWithArgs(chain, param.args);
+                    param.setResult(result);
+                }
+                invokeHookAfter(callback, param);
+                if (param.hasThrowable()) throw param.getThrowable();
+                return result;
+            });
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
     public static void findAndHookMethod(Class<?> clazz, String methodName, Object... args) {
         try {
             XC_MethodHook callback = (XC_MethodHook) args[args.length - 1];
@@ -1077,10 +1153,8 @@ private static final String[] RANDOM_UAS = new String[]{
                 if (param.getResult() != RESULT_UNSET) {
                     result = param.getResult();
                 } else {
-                    // 2026-09-20 S2 修复:把 hook 内对 param.args 的修改回写 chain
-                    // (此前只把 chain.getArgs().toArray() 快照给 param.args,改动从不生效)
-                    syncArgsToChain(chain.getArgs(), param.args);
-                    result = chain.proceed();
+                    // 2026-10-04 真机修正:同 findAndHookMethod,改用带参放行接口
+                    result = proceedWithArgs(chain, param.args);
                     param.setResult(result);
                 }
                 invokeHookAfter(callback, param);
@@ -2634,9 +2708,11 @@ private static final String[] RANDOM_UAS = new String[]{
                     });
 
             // 离开地区页时复位 sRegionPageActive,避免返回后在其它页面误触发滚动补偿。
-            // 注:onDestroyView 在新版三星里可能被移到父类/改名,单独容错,失败不影响其余 hook。
+            // 注:onDestroyView 定义在 Fragment(父类),原 getDeclaredMethod 只查本类 →
+            // 真机实测 NoSuchMethodException,该复位逻辑一直没生效。
+            // 2026-10-04:改用向上查找的版本。
             try {
-            findAndHookMethod(prefFrag, "onDestroyView",
+            findAndHookMethodInHierarchy(prefFrag, "onDestroyView",
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
@@ -19292,7 +19368,9 @@ private static void showUaGroupDialog(final Context ctx) {
 
             // 布局变化时同步图标显隐(切主页/网页/滚动都触发,状态及时)
             try {
-                findAndHookMethod(layoutCls, "onLayout",
+                // 2026-10-04:改用向上查找 —— onLayout 定义在 ViewGroup(父类),
+                // 原 getDeclaredMethod 只查本类,真机上必然 NoSuchMethodException。
+                findAndHookMethodInHierarchy(layoutCls, "onLayout",
                         boolean.class, int.class, int.class, int.class, int.class,
                         new XC_MethodHook() {
                             @Override
