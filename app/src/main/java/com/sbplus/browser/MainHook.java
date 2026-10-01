@@ -1510,33 +1510,35 @@ private static final String[] RANDOM_UAS = new String[]{
      *  <b>而且重启也修不回来，因为错的正是持久化数据</b>。实测就是这样：
      *  用户关掉功能再打开、甚至重启浏览器后功能仍然不工作。
      *
-     *  <p>现在改为**只有一个真相源**：hook 注册时直接问"用户开关是不是开着的"。
-     *  关了就不注册、开了就注册，**重启天然一致**，不需要任何"已撤销"记录。
-     *  关闭功能时仍做"直通替换"让本进程即时生效，但**不再写任何额外状态**。
+     *  <p><b>⚠️ 2026-10-04 紧急修正：注册期不可读开关，判定必须延后</b>
+     *
+     *  <p>推倒重做的第一版在**注册时**读用户开关决定是否注册，结果造成
+     *  <b>全部功能失效</b>（主人实测："功能基本上都失效了，开关开着也失效了"）。
+     *
+     *  <p>根因是时序：本方法在 <b>类加载期</b>执行（doHooks 由 onPackageLoaded 触发），
+     *  而所有 {@code isXxxEnabled()} 都依赖 {@code sAppContext} —— 它要等
+     *  {@code Application.onCreate} 才被赋值。即此刻 {@code sAppContext == null}，
+     *  这些方法**一律返回 false**（其设计是"Context 未就绪时视为未开启"，
+     *  对运行时查询是安全方向，对注册期决策却是灾难）。
+     *
+     *  <p><b>正确做法（本版）</b>：注册时**无条件注册**（此时读不到开关，不该据此决策），
+     *  把"该功能对应哪个开关"记下来，等到 {@code Application.onCreate}（Context 已就绪）
+     *  再由 {@link #applyUserToggles()} 按**真实开关值**对已注册的 hook 做
+     *  <b>直通替换</b>（与用户运行时关闭走同一条机制）。
+     *
+     *  <p>这样真相源仍只有"用户开关"一个：注册只看"有没有这个功能"，
+     *  开/关一律由开关值决定，且**重启后行为与开关一致**。
      *
      *  @param name     功能标识（用于状态记录与菜单"(失效)"标记）
-     *  @param enabled  该功能是否被用户启用；返回 false 则**完全不注册**。
-     *                  传 null 表示该功能没有用户开关（常驻功能），总是注册。
+     *  @param enabled  该功能对应的用户开关（可为 null = 常驻功能，无开关）。
+     *                  <b>注意：注册时不使用它</b>，只登记以便 onCreate 阶段统一判定。
      *  @param register 实际注册动作
      */
-    private static void safeFeature(String name, java.util.function.BooleanSupplier enabled,
+    private static void safeFeature(String name, java.util.function.Supplier<Boolean> enabled,
                                     Runnable register) {
-        // ① 用户没开这个功能 -> 不注册。这是唯一真相源。
+        // 登记"功能 → 开关"映射，供 Application.onCreate 阶段统一按真实开关值处理。
         if (enabled != null) {
-            boolean on;
-            try {
-                on = enabled.getAsBoolean();
-            } catch (Throwable t) {
-                // 读开关失败：保守按"关闭"处理，避免在用户明确关闭时仍然挂上 hook。
-                MainModule.logMsg("[SBPlus] feature '" + name + "' toggle read failed, skip: " + t);
-                synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
-                return;
-            }
-            if (!on) {
-                MainModule.logMsg("[SBPlus] feature SKIPPED (user disabled) '" + name + "'");
-                synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
-                return;
-            }
+            synchronized (sToggleSuppliers) { sToggleSuppliers.put(name, enabled); }
         }
         boolean ok = false;
         HookRegistry.beginFeature(name);
@@ -1556,6 +1558,64 @@ private static final String[] RANDOM_UAS = new String[]{
     /** 兼容重载：无用户开关的常驻功能。 */
     private static void safeFeature(String name, Runnable register) {
         safeFeature(name, null, register);
+    }
+
+    /** 功能名 → 它的用户开关读取器（由 safeFeature 在注册期登记）。 */
+    private static final java.util.Map<String, java.util.function.Supplier<Boolean>> sToggleSuppliers =
+            new java.util.concurrent.ConcurrentHashMap<String, java.util.function.Supplier<Boolean>>();
+
+    /**
+     * 按**真实用户开关**处理已注册的功能（2026-10-04 新增）。
+     *
+     * <p><b>为什么必须在 onCreate 阶段做</b>：hook 注册发生在类加载期，那时
+     * {@code sAppContext} 还没赋值，所有 {@code isXxxEnabled()} 一律返回 false
+     * （它们的契约是"Context 未就绪时视为未开启"）。若在注册期据此决策，
+     * 会导致**全部功能失效** —— 这正是推倒重做第一版的错误。
+     *
+     * <p>因此注册期只做两件事：① 无条件注册；② 登记"功能 → 开关"映射。
+     * 等 {@code Application.onCreate}（Context 已就绪）时再调用本方法，
+     * 读**真实开关值**：关着的功能用**直通替换**让它失效
+     * （与用户运行时关闭走完全相同的机制），开着的保持不动。
+     *
+     * <p>这样真相源只有一个（用户开关），且**重启后行为与开关一致**：
+     * 关了的下次启动注册后立即被替换成直通，开了的正常工作。
+     *
+     * <p>幂等：重复调用无副作用（已替换过的功能其 REVOKED 标记已置位，
+     * 再次进入只会重复替换同一个直通实现）。
+     */
+    private static void applyUserToggles() {
+        try {
+            int disabled = 0;
+            for (java.util.Map.Entry<String, java.util.function.Supplier<Boolean>> e
+                    : sToggleSuppliers.entrySet()) {
+                String feature = e.getKey();
+                boolean on;
+                try {
+                    Boolean v = e.getValue().get();
+                    on = Boolean.TRUE.equals(v);
+                } catch (Throwable t) {
+                    // 读失败：保守视为"开着"，不动它（宁可多一个功能，不可少）。
+                    MainModule.logMsg("[SBPlus] toggle read failed for '" + feature + "': " + t);
+                    continue;
+                }
+                if (!on) {
+                    // 用户关着这个功能 → 直通替换（即时生效，无需重启）。
+                    int n = HookRegistry.revokeFeature(feature);
+                    synchronized (sFeatureStatus) { sFeatureStatus.put(feature, false); }
+                    disabled++;
+                    MainModule.logMsg("[SBPlus] feature '" + feature
+                            + "' disabled per user toggle, hooks=" + n);
+                } else {
+                    // 用户开着 → 若之前被标记为关闭，恢复它（例如上次运行时关过又打开）。
+                    HookRegistry.reEnableFeature(feature);
+                    markFeatureReEnabled(feature);
+                }
+            }
+            MainModule.logMsg("[SBPlus] user toggles applied, disabled=" + disabled
+                    + " of " + sToggleSuppliers.size());
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] applyUserToggles error: " + t);
+        }
     }
 
     /**
@@ -2957,11 +3017,11 @@ private static final String[] RANDOM_UAS = new String[]{
                             sAppContext = (Context) param.thisObject;
                             LogWriter.init(sAppContext);
                             LogWriter.log("core", "captured Application Context: " + sAppContext);
-                            // 2026-10-04 推倒重做后不再需要在这里载入/应用"已撤销功能"：
-                            // hook 注册发生在类加载期，而那时 safeFeature 已经**直接读了
-                            // 用户开关**决定是否注册 —— 开关本身就是唯一真相源，
-                            // 不存在"注册完再纠正"的需求。
-                            HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
+                            // 2026-10-04：**关键一步** —— 此刻 Context 才就绪，读**真实用户开关**，
+// 把用户关掉的功能做直通替换（见 applyUserToggles 的说明）。
+// 注册期读不到开关（sAppContext 为 null），故判定必须延后到这里。
+HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
+                            applyUserToggles();
                             // 2026-10-04：自检 —— 验证 currentAppContext() 的反射路径可用。
                             // 热重载后新一代拿不到 Context（生命周期回调不重放），
                             // 唯一出路就是这条反射路径；若它在真机上不可用，
