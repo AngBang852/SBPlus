@@ -5976,11 +5976,23 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
             }
 
             // onDraw 兜底: 任何浏览器 UI ImageView 重绘时都确保染主题色(覆盖动态菜单图标)
+            //
+            // 2026-10-04 修复(主人反馈"图标会有一瞬间变成原来的颜色然后染上色"):
+            // 原先挂在 **afterHookedMethod**，即"先绘制、后染色" —— 每一帧的顺序是
+            //   ① 三星按原色把图标画到画布上（用户此刻看到原色）
+            //   ② 我们的 afterHook 才把 drawable 染成主题色
+            // 于是**每一帧都会先闪一下原色**。改为 **beforeHookedMethod**：
+            // 在绘制发生之前就把颜色设好，当帧画出来的就是主题色，闪烁消失。
+            //
+            // 安全性：before 阶段只做"设置 drawable 的 colorFilter / view 的 imageTintList"，
+            // 这两者都是影响绘制结果的属性，在 onDraw 之前设置正是标准时机
+            // （与 View 自己在 onDraw 里用 paint 设色同理），不会触发额外的重绘请求，
+            // 也不改变 onDraw 的返回值语义（它是 void）。
             try {
                 findAndHookMethod("android.widget.ImageView", cl, "onDraw",
                     android.graphics.Canvas.class,
                     new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             try {
                                 Object o = param.thisObject;
                                 if (o instanceof android.widget.ImageView) {
