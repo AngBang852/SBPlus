@@ -26140,20 +26140,34 @@ private static boolean showMediaDialog(String json) {
                     if (ua != null && !ua.isEmpty()) meta.userAgent = ua;
                 } catch (Throwable ignored) {}
             }
-            // Referer 兜底：防盗链站点会校验 Referer，缺失则返回 403。
-            // 用目标 URL 自身作为 Referer 是最安全的近似（同源），
-            // 比留空更可能通过校验，也不会泄露其它站点的地址。
-            if (meta.referrer == null || meta.referrer.isEmpty()) {
-                try {
-                    java.net.URL u = new java.net.URL(meta.url);
-                    meta.referrer = u.getProtocol() + "://" + u.getHost() + "/";
-                } catch (Throwable ignored) {}
-            }
             meta.fileName = safeStr(callMethod(info, "getFileName"));
             meta.referrer = safeStr(callMethod(info, "getReferrer"));
             meta.mimeType = safeStr(callMethod(info, "getMimeType"));
             meta.contentDisposition = safeStr(
                     callMethod(info, "getContentDisposition"));
+            // Referer 兜底：防盗链站点会校验 Referer，缺失则返回 403。
+            //
+            // 2026-10-04 修复(两处错误，都是我引入的)：
+            //  ① **位置错误**：此前这段写在 meta.referrer 被赋值**之前**，
+            //     随后 `meta.referrer = safeStr(callMethod(info,"getReferrer"))`
+            //     又把它覆盖成 null —— 兜底**完全没生效**。
+            //     已移到该赋值之后。
+            //  ② **取值策略不对**：此前用"目标 URL 的同源根"作 Referer，
+            //     但对 192.168 这类 NAS/网盘直链，服务端校验的往往是**你从哪个页面点的下载**，
+            //     而不是文件所在目录。故改为优先用页面真实 URL（sCurrentUrl，
+            //     由油猴注入同步、比 getUrl() 可靠 —— 见 forceDouyinDesktopUa 的注释），
+            //     取不到才退回同源根。
+            if (meta.referrer == null || meta.referrer.isEmpty()) {
+                String pageUrl = sCurrentUrl;
+                if (pageUrl != null && (pageUrl.startsWith("http://") || pageUrl.startsWith("https://"))) {
+                    meta.referrer = pageUrl;
+                } else {
+                    try {
+                        java.net.URL u = new java.net.URL(meta.url);
+                        meta.referrer = u.getProtocol() + "://" + u.getHost() + "/";
+                    } catch (Throwable ignored) {}
+                }
+            }
             // Authorization: 类里不一定有这个 getter(不同版本字段名不同), 所以逐个试,
             // 全都没有就留 null —— callMethod 本身吞异常, 不会影响其它字段。
             meta.authorization = firstNonEmpty(
@@ -26253,19 +26267,6 @@ private static boolean showMediaDialog(String json) {
 
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
-
-            // 2026-10-04 诊断：把实际传给下载器的关键头部记下来。
-            // 主人反馈"外部下载器下载需要登录的文件仍报错"，而 Cookie 是否真的传出去
-            // 是判断根因的唯一依据 —— 只记**长度**不记内容（Cookie 属敏感数据，
-            // 落进日志会扩大泄露面）。
-            try {
-                MainModule.logMsg("[SBPlus] dispatch diag: cookie="
-                        + (meta.cookie == null ? "null" : (meta.cookie.length() + "B"))
-                        + " ua=" + (meta.userAgent == null ? "null" : (meta.userAgent.length() + "B"))
-                        + " referer=" + (meta.referrer == null ? "null" : meta.referrer)
-                        + " auth=" + (meta.authorization == null ? "null" : "yes")
-                        + " url=" + meta.url);
-            } catch (Throwable ignored) {}
 
             if (sAppContext != null) {
                 try {
