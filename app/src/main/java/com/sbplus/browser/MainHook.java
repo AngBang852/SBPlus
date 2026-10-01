@@ -929,7 +929,9 @@ private static final String[] RANDOM_UAS = new String[]{
         }
         // 2026-10-04：设置 hook 优先级与唯一 id（见下方说明）。
         builder = applyPriorityAndId(builder, exec);
-        HookRegistry.register(builder.intercept(hooker));
+        // 同时把 hooker 交给 HookRegistry 保存 —— 用户关闭功能时会把实现换成直通、
+        // 重新打开时再 replaceHook 回来，那一步需要原实现（见 HookRegistry 说明）。
+        HookRegistry.register(builder.intercept(hooker), hooker);
     }
 
     /**
@@ -1607,8 +1609,12 @@ private static final String[] RANDOM_UAS = new String[]{
      */
     public static boolean isFeatureAvailable(String name) {
         if (name == null) return false;
-        // 本进程内 hook 已被卸下 => 无论开关是否又打开，都不可用（不可恢复）。
+        // 本进程内 hook 被**真正 unhook** 过 => 不可用（不可恢复）。
+        // 注意：用户"关闭功能"走的是直通替换（handle 仍有效），不记入 sRuntimeDead，
+        // 故那种情况不在此拦截 —— 由下面的 isRevoked 判断。
         if (HookRegistry.isRuntimeDead(name)) return false;
+        // 用户主动关闭的功能：hook 虽在但已被换成直通实现，对业务而言等同于不可用。
+        if (HookRegistry.isRevoked(name)) return false;
         synchronized (sFeatureStatus) {
             Boolean b = sFeatureStatus.get(name);
             return b != null && b;
@@ -6301,19 +6307,42 @@ private static boolean isThemeMasterEnabled() {
 
     /** 是否浏览器 UI 图标(排除设置页/主页背景/专用页; 覆盖工具栏+菜单等). */
     private static boolean isBrowserUiIcon(android.view.View v) {
-        // 结论仅取决于 view 的 id 名、父链类型与所属 Activity —— 这些在 view 生命周期内
-        // 都不变,而本方法被 ImageView.onDraw / setImageDrawable 每帧调用,
-        // 内部要走整条父链 + 多次 toLowerCase + contains。按 view 缓存结论。
+        // 结论取决于 view 的 id 名、父链类型与所属 Activity。
+        // 按 view 缓存结论以避免每帧走整条父链 + 多次 toLowerCase/contains。
+        //
+        // 2026-10-04 修复(主人反馈"底栏图标还是不能保持染色"):
+        // **缓存必须随 view 的"身份"失效**。
+        //
+        // 原实现只按 view 实例缓存结论,注释断言"这些在 view 生命周期内都不变" ——
+        // 该断言**不成立**:三星底栏/工具栏会**复用 ImageView**(RecyclerView 式),
+        // 同一个实例会被重新绑定到**不同的 id / 不同的父容器**上。
+        // 于是缓存里存的是"旧身份"的结论,复用后身份已变但缓存仍命中:
+        // 本该染色的图标被按旧结论判为"不染" → 显示回原色;反之也可能误染。
+        // 这比"view 层 tint 被重置"更深一层,是"时好时坏"的真正机制。
+        //
+        // 修法:把 view 的当前 id 纳入缓存校验 —— id 变化即视为身份变化,重算结论。
+        // 用 id 而非 ResourceEntryName:取 id 是零成本字段读取,而 getResourceEntryName
+        // 本身就要查资源表(正是本缓存想避免的开销)。
+        final int vid;
+        try { vid = v.getId(); } catch (Throwable t) { return computeIsBrowserUiIcon(v); }
+        Integer cachedId;
         Boolean cached;
-        synchronized (sBrowserIconCache) { cached = sBrowserIconCache.get(v); }
-        if (cached != null) return cached;
+        synchronized (sBrowserIconCache) { cachedId = sBrowserIconIdCache.get(v); cached = sBrowserIconCache.get(v); }
+        if (cached != null && cachedId != null && cachedId.intValue() == vid) return cached;
         boolean result = computeIsBrowserUiIcon(v);
-        synchronized (sBrowserIconCache) { sBrowserIconCache.put(v, result); }
+        synchronized (sBrowserIconCache) {
+            sBrowserIconCache.put(v, result);
+            sBrowserIconIdCache.put(v, vid);
+        }
         return result;
     }
 
     private static final java.util.WeakHashMap<android.view.View, Boolean> sBrowserIconCache =
             new java.util.WeakHashMap<android.view.View, Boolean>();
+
+    /** 与 {@link #sBrowserIconCache} 配套:记录缓存结论时该 view 的 id，用于身份校验。 */
+    private static final java.util.WeakHashMap<android.view.View, Integer> sBrowserIconIdCache =
+            new java.util.WeakHashMap<android.view.View, Integer>();
 
     private static boolean computeIsBrowserUiIcon(android.view.View v) {
         try {
@@ -11277,12 +11306,48 @@ private static void showUaGroupDialog(final Context ctx) {
     /** 已染主题色的 ImageView 记录(懒染色: 只在未染/被覆盖时重染, 避免每帧重复导致卡顿). */
     private static java.util.WeakHashMap<android.widget.ImageView, Boolean> sIconTinted = new java.util.WeakHashMap<>();
 
-    /** 判定为「永不染色」的 ImageView 缓存。判定依据是 view 的 id 名与父链结构,
-     *  两者在 view 生命周期内不变,因此可以缓存。ensureIconTint 挂在
-     *  ImageView.onDraw 上,每帧对每个 ImageView 都会跑一次,原实现每次都要
-     *  getResourceEntryName + 向上遍历整条父链,是明显的每帧 CPU 开销与发热来源。 */
+    /** 判定为「永不染色」的 ImageView 缓存。判定依据是 view 的 id 名与父链结构。
+     *  ensureIconTint 挂在 ImageView.onDraw 上,每帧对每个 ImageView 都会跑一次,
+     *  原实现每次都要 getResourceEntryName + 向上遍历整条父链,是明显的每帧 CPU 开销。
+     *
+     *  <p><b>2026-10-04 修复</b>:原注释断言"id 名与父链结构在 view 生命周期内不变",
+     *  该断言**不成立** —— 三星会**复用 ImageView**(RecyclerView 式),同一实例被重新
+     *  绑定到不同的 id/父容器上。此时缓存里"不染"的旧结论会错误地命中,导致本该染色的
+     *  图标保持原色。故配套记录 view 的 id 做身份校验(见 {@link #sIconSkipId})。 */
     private static final java.util.WeakHashMap<android.widget.ImageView, Boolean> sIconSkip =
             new java.util.WeakHashMap<android.widget.ImageView, Boolean>();
+
+    /** 与 {@link #sIconSkip} 配套:记录判定时该 view 的 id，id 变化即失效重判。 */
+    private static final java.util.WeakHashMap<android.widget.ImageView, Integer> sIconSkipId =
+            new java.util.WeakHashMap<android.widget.ImageView, Integer>();
+
+    /** 查询"该 view 是否已被判定为不染"（带 id 身份校验）。 */
+    private static boolean isIconSkipped(android.widget.ImageView iv) {
+        try {
+            Boolean skip;
+            Integer sid;
+            synchronized (sIconSkip) {
+                skip = sIconSkip.get(iv);
+                sid = sIconSkipId.get(iv);
+            }
+            if (skip == null || !skip) return false;
+            int vid = iv.getId();
+            if (sid == null || sid.intValue() != vid) return false;   // 身份变了 -> 缓存失效
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 标记"该 view 不染"（带 id 身份记录）。 */
+    private static void markIconSkipped(android.widget.ImageView iv) {
+        try {
+            synchronized (sIconSkip) {
+                sIconSkip.put(iv, Boolean.TRUE);
+                sIconSkipId.put(iv, iv.getId());
+            }
+        } catch (Throwable ignored) {}
+    }
 
     /** 懒染色: 若该图标尚未染成 S_HOME_ICON(或被三星覆盖回原色)则重染; 否则跳过省性能. */
     private static void ensureIconTint(android.widget.ImageView iv) {
@@ -11328,11 +11393,9 @@ private static void showUaGroupDialog(final Context ctx) {
                 if (drawableOk && viewTintOk) return;
             } catch (Throwable ignored) {}
             // 快路径 2:此前已判定"不该染"(网页内容图/缩略图/非浏览器 UI 图标)-> 直接返回。
-            try {
-                synchronized (sIconSkip) {
-                    if (Boolean.TRUE.equals(sIconSkip.get(iv))) return;
-                }
-            } catch (Throwable ignored) {}
+            // 2026-10-04:改用带 id 身份校验的查询 —— 三星会复用 ImageView,
+            // 旧结论不能无条件命中(详见 isIconSkipped 说明)。
+            if (isIconSkipped(iv)) return;
             // 地址栏内的图标: 只染刷新按钮和收藏,其他(含跳转App图标)全部跳过
             android.view.ViewGroup tg = sToolbarParentCache;
             if (tg != null) {
@@ -11382,7 +11445,7 @@ private static void showUaGroupDialog(final Context ctx) {
                         if (cfBg instanceof android.graphics.PorterDuffColorFilter) bgSkip.clearColorFilter();
                     }
                 } catch (Throwable ignoredClean) {}
-                try { synchronized (sIconSkip) { sIconSkip.put(iv, Boolean.TRUE); } } catch (Throwable ignored) {}
+                try { markIconSkipped(iv); } catch (Throwable ignored) {}
                 // 诊断:浏览助手为何被跳过
                 try {
                     String idn = iv.getResources().getResourceEntryName(iv.getId());
@@ -11401,7 +11464,7 @@ private static void showUaGroupDialog(final Context ctx) {
                         || idl2.contains("site_icon") || idl2.contains("website_icon")
                         || idl2.contains("webpage") || idl2.contains("page_icon")) {
                     // id 名固定 -> 同样可以永久 skip。
-                    try { synchronized (sIconSkip) { sIconSkip.put(iv, Boolean.TRUE); } } catch (Throwable ignored) {}
+                    try { markIconSkipped(iv); } catch (Throwable ignored) {}
                     return;
                 }
             } catch (Throwable ignored) {}

@@ -154,6 +154,32 @@ final class HookRegistry {
      * @return true = 已登记且生效；false = 该功能已被撤销，handle 已被就地撤销
      */
     static boolean register(XposedInterface.HookHandle handle) {
+        return register(handle, null);
+    }
+
+    /**
+     * 登记一个 handle 并**同时保存它的 hooker**（2026-10-04 新增）。
+     *
+     * <p><b>为什么需要保存 hooker</b>：这是"功能可被重新打开"的关键。
+     *
+     * <p>早先的实现是"关闭 = unhook"，于是**无法恢复** —— libxposed 没有"把 hook
+     * 重新挂回已被 unhook 的方法"的接口，用户重开开关后必须重启浏览器
+     * （主人实测反馈："开关关闭后重开没有实现功能重新打开"）。
+     *
+     * <p>改用 libxposed 的 {@code HookHandle.replaceHook(Hooker)}：官方说明它是
+     * "Atomically replaces this hook with a new hooker"，且**保留** executable、
+     * priority、异常模式与 id。因此正确的做法是：
+     * <ul>
+     *   <li><b>关闭</b>：不 unhook，而是把 hooker 替换成**直通实现**（原样 proceed）；</li>
+     *   <li><b>打开</b>：再 replaceHook 回**原实现</b>。</li>
+     * </ul>
+     * 两个方向都**即时生效、无需重启**。保存 hooker 就是为了"打开"那一步能拿回原实现。
+     *
+     * @param handle 已创建的 hook handle
+     * @param hooker 该 handle 对应的原始 hooker（可为 null，表示不支持重新打开）
+     */
+    static boolean register(XposedInterface.HookHandle handle,
+                            XposedInterface.Hooker hooker) {
         if (handle == null) return false;
         String feature = CURRENT_FEATURE.get();
         if (feature == null) {
@@ -163,6 +189,18 @@ final class HookRegistry {
         }
         synchronized (LOCK) {
             if (REVOKED.contains(feature)) {
+                // 该功能已被用户关闭：立刻把 hooker 换成直通实现，
+                // 而不是 unhook —— 保留 handle 才能在用户重新打开时 replaceHook 回来。
+                if (hooker != null) {
+                    XposedInterface.HookHandle nh = replaceWithPassthrough(handle, hooker);
+                    if (nh != null) {
+                        List<XposedInterface.HookHandle> l = BY_FEATURE.get(feature);
+                        if (l == null) { l = new ArrayList<XposedInterface.HookHandle>(); BY_FEATURE.put(feature, l); }
+                        l.add(nh);
+                        HOOKER_BY_HANDLE.put(nh, hooker);
+                        return false;
+                    }
+                }
                 try { handle.unhook(); } catch (Throwable ignored) {}
                 return false;
             }
@@ -172,8 +210,74 @@ final class HookRegistry {
                 BY_FEATURE.put(feature, list);
             }
             list.add(handle);
+            if (hooker != null) HOOKER_BY_HANDLE.put(handle, hooker);
             return true;
         }
+    }
+
+    /** handle → 原始 hooker（用于"重新打开"时 replaceHook 回来）。 */
+    private static final Map<XposedInterface.HookHandle, XposedInterface.Hooker> HOOKER_BY_HANDLE =
+            new java.util.concurrent.ConcurrentHashMap<XposedInterface.HookHandle, XposedInterface.Hooker>();
+
+    /** 直通 hooker：原样调用原方法，不做任何修改（功能"关闭"时的替身）。 */
+    private static final XposedInterface.Hooker PASSTHROUGH = new XposedInterface.Hooker() {
+        @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            return chain.proceed();
+        }
+    };
+
+    /** 把 handle 的实现换成直通；成功返回新 handle，失败返回 null。 */
+    private static XposedInterface.HookHandle replaceWithPassthrough(
+            XposedInterface.HookHandle handle, XposedInterface.Hooker originalHooker) {
+        try {
+            return handle.replaceHook(PASSTHROUGH);
+        } catch (Throwable t) {
+            android.util.Log.w("SBPlus", "replaceHook(passthrough) failed", t);
+            return null;
+        }
+    }
+
+    /**
+     * 重新启用某功能（用户把开关打开时调用）（2026-10-04 新增）。
+     *
+     * <p><b>这是"功能可被重新打开"的实现</b>：早先的实现只做 unhook，
+     * 而 libxposed 没有"把 hook 重新挂回已 unhook 的方法"的接口，故用户重开后
+     * 必须重启浏览器（主人实测反馈的问题）。改用 {@code replaceHook} 后，
+     * 关闭只是把实现换成直通、**handle 仍然有效**，因此可以再 replaceHook 回原实现，
+     * **两个方向都即时生效**。
+     *
+     * @return 实际恢复的 hook 数量
+     */
+    static int reEnableFeature(String feature) {
+        if (feature == null) return 0;
+        List<XposedInterface.HookHandle> list;
+        synchronized (LOCK) {
+            REVOKED.remove(feature);
+            sRuntimeDead.remove(feature);   // 若本次是"直通替换"而非 unhook，则运行期并未真死
+            list = BY_FEATURE.get(feature);
+        }
+        persistRevoked();
+        if (list == null || list.isEmpty()) return 0;
+        int n = 0;
+        List<XposedInterface.HookHandle> updated = new ArrayList<XposedInterface.HookHandle>();
+        for (XposedInterface.HookHandle h : new ArrayList<XposedInterface.HookHandle>(list)) {
+            XposedInterface.Hooker orig = HOOKER_BY_HANDLE.get(h);
+            if (orig == null) continue;   // 无原实现可恢复（旧版本登记的 handle）
+            try {
+                XposedInterface.HookHandle nh = h.replaceHook(orig);
+                updated.add(nh);
+                HOOKER_BY_HANDLE.remove(h);
+                HOOKER_BY_HANDLE.put(nh, orig);
+                n++;
+            } catch (Throwable t) {
+                android.util.Log.w("SBPlus", "replaceHook(restore) failed", t);
+            }
+        }
+        synchronized (LOCK) {
+            if (!updated.isEmpty()) BY_FEATURE.put(feature, updated);
+        }
+        android.util.Log.i("SBPlus", "re-enabled feature " + feature + ", restored=" + n);
+        return n;
     }
 
     /**
@@ -195,15 +299,42 @@ final class HookRegistry {
         persistRevoked();
         if (list == null) return 0;
         int n = 0;
+        // 2026-10-04 关键改动：优先用**直通替换**而不是 unhook。
+        //
+        // 为什么：unhook 是**不可逆**的（libxposed 没有"重新挂回已 unhook 方法"的接口），
+        // 于是用户重开开关后必须重启浏览器才能恢复 —— 这正是主人实测反馈的问题
+        // （"开关关闭后重开没有实现功能重新打开"）。
+        // 而 replaceHook 官方说明是"原子替换且保留 executable/priority/异常模式/id"，
+        // 因此把实现换成直通（原样 proceed）后，handle 仍然有效、可以再替换回原实现，
+        // 两个方向都即时生效。
+        List<XposedInterface.HookHandle> replaced = new ArrayList<XposedInterface.HookHandle>();
         for (XposedInterface.HookHandle h : list) {
+            XposedInterface.Hooker orig = HOOKER_BY_HANDLE.get(h);
+            if (orig != null) {
+                XposedInterface.HookHandle nh = replaceWithPassthrough(h, orig);
+                if (nh != null) {
+                    HOOKER_BY_HANDLE.remove(h);
+                    HOOKER_BY_HANDLE.put(nh, orig);   // 记住原实现，供重新打开时恢复
+                    replaced.add(nh);
+                    n++;
+                    continue;
+                }
+            }
+            // 无原实现（旧登记方式）或替换失败 → 退回 unhook（此时确实不可恢复）。
             try {
                 h.unhook();
+                synchronized (LOCK) { sRuntimeDead.add(feature); }
                 n++;
             } catch (Throwable t) {
                 android.util.Log.w("SBPlus", "unhook failed for feature " + feature, t);
             }
         }
-        android.util.Log.i("SBPlus", "revoked " + n + " hook(s) for feature " + feature);
+        // 把替换后的新 handle 放回登记表 —— 它们仍然有效，重新打开时要用。
+        synchronized (LOCK) {
+            if (!replaced.isEmpty()) BY_FEATURE.put(feature, replaced);
+        }
+        android.util.Log.i("SBPlus", "revoked " + n + " hook(s) for feature " + feature
+                + " (passthrough=" + replaced.size() + ")");
         return n;
     }
 

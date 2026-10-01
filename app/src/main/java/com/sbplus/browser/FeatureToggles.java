@@ -88,17 +88,23 @@ final class FeatureToggles {
         String feature = featureOf(toggleKey);
         if (feature == null) return -1;
         if (enabled) {
-            // 打开方向分两步：
-            // ① 清除"已撤销"标记 —— 让下次启动能正常注册；
-            boolean wasRevoked = HookRegistry.clearRevoked(feature);
-            // ② 恢复状态标记 —— 否则菜单会一直错误地显示"(失效)"。
-            //    这正是主人报的"关掉再打开显示失效，重启浏览器后才正常"的根因：
-            //    disableFeatureRuntime 把 sFeatureStatus 置为 false 供 featureDown 判断，
-            //    而打开时原先只清了 REVOKED、没恢复它。
+            // 打开方向：**即时恢复 hook 实现**（2026-10-04 重做）。
+            //
+            // 早先的实现只清 REVOKED 标记、并提示"需要重启浏览器" —— 因为当时
+            // 关闭走的是 unhook，而 libxposed 没有"重新挂回已 unhook 方法"的接口。
+            // 主人实测反馈："开关关闭后重开没有实现功能重新打开"。
+            //
+            // 现在关闭改为"把实现替换成直通"（handle 仍有效），因此重开可以
+            // replaceHook 回原实现，**无需重启**。
+            // 仅当替换不可用（旧登记方式/框架不支持）时才退回"提示重启"。
+            boolean wasRevoked = HookRegistry.isRevoked(feature);
+            int restored = HookRegistry.reEnableFeature(feature);
             MainHook.markFeatureReEnabled(feature);
-            if (wasRevoked) {
-                // 被 unhook 的方法在本进程内无法重新 hook（libxposed 无此接口），
-                // 故必须提示重启。
+            if (restored > 0) {
+                MainHook.toastOnMainPublic(MainHook.T("已开启，立即生效",
+                        "Enabled, effective immediately"));
+            } else if (wasRevoked) {
+                // 无法即时恢复（该功能的 hook 已被真正 unhook）→ 只能重启。
                 MainHook.toastOnMainPublic(MainHook.T("该功能需要重启浏览器后生效",
                         "This feature needs a browser restart to take effect"));
             }
