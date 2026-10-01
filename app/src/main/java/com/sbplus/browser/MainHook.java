@@ -17257,7 +17257,7 @@ private static void showUaGroupDialog(final Context ctx) {
 
     /** 启动脚本自动更新检查后台线程(按间隔周期检查)。 */
     private static void scheduleUserscriptAutoUpdate() {
-        new Thread(new Runnable() {
+        Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 while (true) {
                     try {
@@ -17287,7 +17287,58 @@ private static void showUaGroupDialog(final Context ctx) {
                     }
                 }
             }
-        }, "sbplus-auto-update").start();
+        }, "sbplus-auto-update");
+        t.setDaemon(true);
+        // 2026-10-04：保存引用以便热重载时中断它（见 stopBackgroundLoopsForReload）。
+        // 这个 while(true) 循环是常驻线程，不持有引用就无法停止；
+        // 而热重载要求停掉模块自有线程，否则旧 classloader 会被它钉住。
+        sAutoUpdateThread = t;
+        t.start();
+    }
+
+    /** 脚本自动更新检查的常驻线程（供热重载中断）。 */
+    private static volatile Thread sAutoUpdateThread;
+
+    /**
+     * 热重载前停止模块自有的常驻循环（2026-10-04 新增）。
+     *
+     * <p>libxposed 官方要求：同意热重载前必须停止模块自有的全部 Java/native 线程。
+     * 线程池已由 {@link SbExecutors#shutdownAll()} 处理，这里处理**不在池里**的常驻循环
+     * （见 SbExecutors 类注释中"不收编的线程"一节）。
+     *
+     * <p>被中断的循环已正确处理 {@code InterruptedException}（直接 break 退出），
+     * 故 interrupt 即可安全终止。
+     */
+    static void stopBackgroundLoopsForReload() {
+        try {
+            Thread t = sAutoUpdateThread;
+            if (t != null && t.isAlive()) {
+                t.interrupt();
+                MainModule.logMsg("[SBPlus] auto-update loop interrupted for hot reload");
+            }
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] stopBackgroundLoopsForReload error: " + t);
+        }
+    }
+
+    /**
+     * 热重载后，新代码需要的 classloader（2026-10-04 新增）。
+     *
+     * <p>热重载会换掉模块的 classloader（旧代被回收）。新代码重新注册 hook 时必须用
+     * <b>当前代</b>的加载器去解析宿主类，否则会拿着已失效的旧加载器去加载类。
+     *
+     * <p>实现：优先用 {@code sModuleClassLoader}（doHooks 时被赋值为宿主包的
+     * default classloader，它由宿主进程提供、跨代不变，正是我们要的那个）；
+     * 若为空则退回本类自身的 classloader（新代的模块加载器，至少可用）。
+     */
+    static ClassLoader moduleClassLoaderForReload() {
+        ClassLoader cl = sModuleClassLoader;
+        if (cl != null) return cl;
+        try {
+            return MainHook.class.getClassLoader();
+        } catch (Throwable t) {
+            return ClassLoader.getSystemClassLoader();
+        }
     }
 
     /** 从 url 下载 .user.js 到目录(供下载拦截使用)。 */

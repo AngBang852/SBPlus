@@ -99,4 +99,39 @@ final class SbExecutors {
             }
         };
     }
+
+    /**
+     * 关闭全部池（2026-10-04 新增，供热重载使用）。
+     *
+     * <p><b>为什么热重载必须调它</b>：libxposed 官方文档明确要求 ——
+     * {@code onHotReloading} 返回 true（同意重载）之前，模块必须
+     * "stop all module-owned Java and native threads"。
+     * 若不停止，这些线程会持有**旧模块 classloader**，导致旧代码无法被回收
+     * （官方文档：框架会释放它自己持有的引用，但"模块代码持有的引用"不会被释放），
+     * 于是每次热重载都泄漏一整个 classloader。
+     *
+     * <p><b>用 shutdownNow 而非 shutdown</b>：shutdown 只是不再接受新任务、
+     * 已排队任务仍会跑完，而队列里可能有上百个待执行任务（bg 池队列容量 256）——
+     * 那意味着"同意重载"之后旧代码还在跑，违反官方要求。
+     * shutdownNow 会中断在跑的任务并丢弃排队任务。
+     *
+     * <p><b>关闭后本代（旧代码）无法再用池</b>——这是**预期行为，不是缺陷**：
+     * 热重载会换掉模块 classloader，新一代的 {@code SbExecutors} 是**全新的类**，
+     * 上面那几个 static final 字段会在新代里重新初始化、得到全新的池。
+     * 因此"旧池被关"只影响旧代码，而旧代码本就该被淘汰。
+     * （注意：这依赖"热重载确实换了 classloader"这一前提；若某框架实现不换，
+     * 则旧池关闭会导致后续任务全部失败 —— 届时会在日志里看到大量
+     * "pool task failed: RejectedExecutionException"，可据此定位。）
+     */
+    static void shutdownAll() {
+        for (java.util.concurrent.ThreadPoolExecutor p : new java.util.concurrent.ThreadPoolExecutor[]{
+                BG, HEAVY, NET}) {
+            try {
+                java.util.List<Runnable> dropped = p.shutdownNow();
+                MainModule.logMsg("[SBPlus] executor shutdown, dropped=" + dropped.size());
+            } catch (Throwable t) {
+                MainModule.logMsg("[SBPlus] executor shutdown error: " + t);
+            }
+        }
+    }
 }
