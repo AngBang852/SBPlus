@@ -11472,6 +11472,17 @@ private static void showUaGroupDialog(final Context ctx) {
             // 旧结论不能无条件命中(详见 isIconSkipped 说明)。
             if (isIconSkipped(iv)) return;
             // 地址栏内的图标: 只染刷新按钮和收藏,其他(含跳转App图标)全部跳过
+            //
+            // 2026-10-04 修复(主人反馈"底栏图标染色还是不能持久化"):
+            // 本段原先把"除 toolbar_reload / bookmark_star_icon 之外的一切"都强制清除染色。
+            // 但底栏图标(action_backward / action_forward / action_home / action_bookmarks /
+            // bottombar_* / navigation_bar_item_icon_view)恰恰是 applyToolbarIconTint 与
+            // forceApplyAllToolbarIcons **要染**的目标 —— 只要它们落在 sToolbarParentCache
+            // 子树内(三星把底栏与地址栏放在同一个 LocationBarButtonLayout 下),本段就会在
+            // onDraw(每帧) 把刚染好的颜色清掉 → 表现为"染色不能持久"。
+            //
+            // 故这里改为**白名单放行**:既放行地址栏的刷新/收藏,也放行所有底栏染色目标。
+            // 只有真正不属于这两类的图标(如"跳转App"图标)才被清除。
             android.view.ViewGroup tg = sToolbarParentCache;
             if (tg != null) {
                 android.view.ViewParent ip = iv.getParent();
@@ -11479,15 +11490,20 @@ private static void showUaGroupDialog(final Context ctx) {
                     if (ip == tg) {
                         String idn = "";
                         try { idn = iv.getResources().getResourceEntryName(iv.getId()); } catch (Throwable ignored) {}
-                        if (!idn.equals("toolbar_reload") && !idn.equals("bookmark_star_icon")) {
+                        // 放行名单:地址栏刷新/收藏 + 全部底栏染色目标
+                        boolean allowed = idn.equals("toolbar_reload")
+                                || idn.equals("bookmark_star_icon")
+                                || idn.equals("toolbar_bookmarks")
+                                || idn.equals("toolbar_bookmark")
+                                || idn.equals("action_backward")
+                                || idn.equals("action_forward")
+                                || idn.equals("action_home")
+                                || idn.equals("action_bookmarks")
+                                || idn.equals("bottombar_option_menu")
+                                || idn.equals("bottombar_browsing_assist")
+                                || idn.equals("navigation_bar_item_icon_view");
+                        if (!allowed) {
                             android.graphics.drawable.Drawable dd = iv.getDrawable();
-                            String cfinfo = "none";
-                            if (dd != null) {
-                                android.graphics.ColorFilter cf = dd.getColorFilter();
-                                if (cf instanceof android.graphics.PorterDuffColorFilter) {
-                                    try { cfinfo = Integer.toHexString(reflectColorFilterColor(cf)); } catch (Throwable ignored) { cfinfo = "cf"; }
-                                } else if (cf != null) { cfinfo = cf.getClass().getSimpleName(); }
-                            }
                             // 强制清除地址栏非刷新/收藏图标的任何染色(drawable + view层 tint),恢复原色
                             try {
                                 if (dd != null) dd.clearColorFilter();
@@ -11497,6 +11513,7 @@ private static void showUaGroupDialog(final Context ctx) {
 
                             return;
                         }
+                        // 是白名单内的图标 -> 不在这里清除，交给下面的染色逻辑处理
                         break;
                     }
                     ip = ip.getParent();
@@ -11619,6 +11636,8 @@ private static void showUaGroupDialog(final Context ctx) {
             // 跳过核心背景图片(避免误染大图)
             if (!isBrowserUiIcon(iv)) return;
             // 地址栏内的图标: 只染刷新按钮和收藏,其他(含跳转App图标)全部跳过
+            // 2026-10-04 修复:同 ensureIconTint —— 必须放行底栏染色目标,
+            // 否则底栏图标一进这个子树就被清色(见那里的详细说明)。
             android.view.ViewGroup tg2 = sToolbarParentCache;
             if (tg2 != null) {
                 android.view.ViewParent ip2 = iv.getParent();
@@ -11626,7 +11645,18 @@ private static void showUaGroupDialog(final Context ctx) {
                     if (ip2 == tg2) {
                         String idn2 = "";
                         try { idn2 = iv.getResources().getResourceEntryName(iv.getId()); } catch (Throwable ignored2) {}
-                        if (!idn2.equals("toolbar_reload") && !idn2.equals("bookmark_star_icon")) {
+                        boolean allowed2 = idn2.equals("toolbar_reload")
+                                || idn2.equals("bookmark_star_icon")
+                                || idn2.equals("toolbar_bookmarks")
+                                || idn2.equals("toolbar_bookmark")
+                                || idn2.equals("action_backward")
+                                || idn2.equals("action_forward")
+                                || idn2.equals("action_home")
+                                || idn2.equals("action_bookmarks")
+                                || idn2.equals("bottombar_option_menu")
+                                || idn2.equals("bottombar_browsing_assist")
+                                || idn2.equals("navigation_bar_item_icon_view");
+                        if (!allowed2) {
                             try { if (iv.getDrawable()!=null) iv.getDrawable().clearColorFilter(); } catch (Throwable ignored2b) {}
                             try { iv.setImageTintList(null); } catch (Throwable ignored2c) {}
                             try { iv.clearColorFilter(); } catch (Throwable ignored2d) {}
@@ -26211,6 +26241,19 @@ private static boolean showMediaDialog(String json) {
 
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+
+            // 2026-10-04 诊断：把实际传给下载器的关键头部记下来。
+            // 主人反馈"外部下载器下载需要登录的文件仍报错"，而 Cookie 是否真的传出去
+            // 是判断根因的唯一依据 —— 只记**长度**不记内容（Cookie 属敏感数据，
+            // 落进日志会扩大泄露面）。
+            try {
+                MainModule.logMsg("[SBPlus] dispatch diag: cookie="
+                        + (meta.cookie == null ? "null" : (meta.cookie.length() + "B"))
+                        + " ua=" + (meta.userAgent == null ? "null" : (meta.userAgent.length() + "B"))
+                        + " referer=" + (meta.referrer == null ? "null" : meta.referrer)
+                        + " auth=" + (meta.authorization == null ? "null" : "yes")
+                        + " url=" + meta.url);
+            } catch (Throwable ignored) {}
 
             if (sAppContext != null) {
                 try {
