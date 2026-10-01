@@ -231,6 +231,32 @@ final class HookRegistry {
     }
 
     /**
+     * 本进程内 hook 确实已被卸下的功能（2026-10-04 新增）。
+     *
+     * <p><b>为什么必须与 REVOKED 分开</b>：两者生命周期不同 ——
+     * <ul>
+     *   <li>{@code REVOKED} 是**持久化**的：用户关闭功能时写入、重新打开时清除，
+     *       用于决定"下次启动要不要注册"；</li>
+     *   <li>{@code sRuntimeDead} 是**进程级且不可逆**的：一旦某功能的 hook 在本进程内
+     *       被 unhook，就永远不会被清除 —— libxposed 没有"重新挂上已撤销 handle"的
+     *       接口，被卸下的方法在本进程内不可能恢复。</li>
+     * </ul>
+     *
+     * <p>分开的必要性：用户关闭功能后**又打开**时，{@code REVOKED} 会被清掉
+     * （让下次启动能正常注册），但**此刻 hook 并没有回来**。
+     * 若 {@code MainHook.isFeatureAvailable} 只看 REVOKED，就会误报"可用"，
+     * 业务逻辑继续走依赖该 hook 的路径 → 静默失效。
+     * 用本集合如实回答"本进程内 hook 到底还在不在"。
+     */
+    private static final java.util.Set<String> sRuntimeDead = new java.util.HashSet<String>();
+
+    /** 该功能在本进程内的 hook 是否已被卸下（不可恢复）。 */
+    static boolean isRuntimeDead(String feature) {
+        if (feature == null) return false;
+        synchronized (LOCK) { return sRuntimeDead.contains(feature); }
+    }
+
+    /**
      * 清除某功能的"已撤销"标记（用户重新打开该功能时调用）。
      *
      * <p><b>注意：这不会让功能立即恢复。</b>libxposed 没有"重新挂上已撤销 handle"
@@ -238,12 +264,19 @@ final class HookRegistry {
      * <b>下次浏览器启动</b>时该功能能被正常注册。调用方必须把这一点告知用户
      * （界面提示"需要重启浏览器生效"）。
      *
+     * <p>同时会标记 {@link #sRuntimeDead}：让"本进程内是否可用"的查询如实返回 false，
+     * 避免业务逻辑基于"开关已打开"就以为 hook 回来了。
+     *
      * @return true = 确实清除了标记（此前处于已撤销状态）
      */
     static boolean clearRevoked(String feature) {
         if (feature == null) return false;
         boolean removed;
-        synchronized (LOCK) { removed = REVOKED.remove(feature); }
+        synchronized (LOCK) {
+            removed = REVOKED.remove(feature);
+            // 只要本进程内曾卸下过，就记为"运行期已死"（不可逆）。
+            if (removed) sRuntimeDead.add(feature);
+        }
         if (removed) persistRevoked();
         return removed;
     }

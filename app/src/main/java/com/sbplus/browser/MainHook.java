@@ -1533,6 +1533,39 @@ private static final String[] RANDOM_UAS = new String[]{
     }
 
     /**
+     * 用户重新打开某功能时，把状态标记从"被关闭"改回"正常"（2026-10-04 新增）。
+     *
+     * <p><b>为什么需要它</b>：{@link #disableFeatureRuntime} 会把 {@code sFeatureStatus}
+     * 置为 false，而 {@code featureDown} 据此判断是否显示"(失效)"。
+     * 用户重新打开开关时若不恢复这个标记，菜单会**一直显示"(失效)"直到重启浏览器**
+     * —— 这正是实际发生的 bug。
+     *
+     * <p>注意：这**不会让功能在本进程内立即恢复**（libxposed 没有"重新挂上已撤销
+     * handle"的接口，被 unhook 的方法无法重新 hook）。它只保证：
+     * <ul>
+     *   <li>菜单不再错误地显示"(失效)"；</li>
+     *   <li>下次浏览器启动时该功能能被正常注册（配合 HookRegistry.clearRevoked）。</li>
+     * </ul>
+     * 因此调用方必须同时提示用户"需要重启浏览器生效"。
+     *
+     * <p>不覆盖"真失效"（注册失败/探测失败）：若该功能从未注册成功过，
+     * 保持其 false 状态不变，避免把故障伪装成正常。
+     */
+    public static void markFeatureReEnabled(String name) {
+        if (name == null) return;
+        synchronized (sFeatureStatus) {
+            Boolean cur = sFeatureStatus.get(name);
+            // 只在"曾注册成功、后被用户关闭"时才恢复为 true。
+            // 若为 null（从未注册）或本就 true，无需处理；
+            // 但若 sDeadFeatures 里标记了探测级失效，则不应恢复（那是真故障）。
+            if (cur != null && !cur && !sDeadFeatures.contains(name)) {
+                sFeatureStatus.put(name, true);
+                MainModule.logMsg("[SBPlus] feature re-enabled by user '" + name + "'");
+            }
+        }
+    }
+
+    /**
      * 把"用户已关闭的功能"落到实处（2026-10-04 新增）。
      *
      * <p>为什么需要单独一步：{@code doHooks} 在类加载期就完成了全部 hook 注册，
@@ -1557,8 +1590,25 @@ private static final String[] RANDOM_UAS = new String[]{
         }
     }
 
-    /** 某功能当前是否可用(供业务逻辑在调用前自检,避免在失效功能上继续动作)。 */
+    /**
+     * 某功能当前是否可用(供业务逻辑在调用前自检,避免在失效功能上继续动作)。
+     *
+     * <p><b>2026-10-04 修正语义：必须同时排除"用户已关闭"的功能。</b>
+     *
+     * <p>原实现只看 {@code sFeatureStatus}。但该标记在用户关闭功能后被置为 false、
+     * 重新打开时又被 {@link #markFeatureReEnabled} 恢复为 true —— 而**此时 hook 实际
+     * 并未重新挂上**（libxposed 没有"重新挂上已撤销 handle"的接口）。
+     * 若这里只读 sFeatureStatus 就返回 true，业务逻辑会以为功能可用、
+     * 继续走依赖该 hook 的路径，结果是**静默失效**。
+     *
+     * <p>因此这里额外检查 {@link HookRegistry#isRevoked}：只要该功能在本进程内
+     * 被撤销过（即 hook 确实不在了），就返回 false —— 无论开关是不是又打开了。
+     * 这保证了"返回值 == hook 真的在运行"。
+     */
     public static boolean isFeatureAvailable(String name) {
+        if (name == null) return false;
+        // 本进程内 hook 已被卸下 => 无论开关是否又打开，都不可用（不可恢复）。
+        if (HookRegistry.isRuntimeDead(name)) return false;
         synchronized (sFeatureStatus) {
             Boolean b = sFeatureStatus.get(name);
             return b != null && b;
@@ -1590,10 +1640,29 @@ private static final String[] RANDOM_UAS = new String[]{
     private static final java.util.Set<String> sDeadFeatures =
             java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<String>());
 
-    /** 功能是否失效:注册级失败(safeFeature 记录)或探测级失败(probe 记录)都算。 */
+    /**
+     * 功能是否失效:注册级失败(safeFeature 记录)或探测级失败(probe 记录)都算。
+     *
+     * <p><b>2026-10-04 修复:区分"用户主动关闭"与"功能失效"</b>
+     *
+     * <p>原先 {@code disableFeatureRuntime} 会把 {@code sFeatureStatus} 置为 false，
+     * 于是用户在设置里关掉一个功能后，菜单标题会显示"(失效)" —— 这是**误导**：
+     * 功能并没有坏，是用户自己关的。更糟的是用户**重新打开**开关时，
+     * {@code clearRevoked} 只清了 REVOKED 集合、没有恢复 sFeatureStatus，
+     * 菜单会**一直显示"(失效)"直到重启浏览器**（这正是主人报的现象）。
+     *
+     * <p>现在语义分开：
+     * <ul>
+     *   <li>{@code sFeatureStatus=false} —— 注册失败/探测失败，<b>真失效</b>；</li>
+     *   <li>{@link HookRegistry#isRevoked} —— <b>用户主动关闭</b>，不算失效，
+     *       也不显示"(失效)"标记。</li>
+     * </ul>
+     */
     private static boolean featureDown(String key) {
         if (key == null) return false;
         if (sDeadFeatures.contains(key)) return true;
+        // 用户主动关闭的功能不标"(失效)" —— 那是用户的选择，不是故障。
+        if (HookRegistry.isRevoked(key)) return false;
         synchronized (sFeatureStatus) {
             Boolean b = sFeatureStatus.get(key);
             return b != null && !b;
@@ -11224,13 +11293,39 @@ private static void showUaGroupDialog(final Context ctx) {
             if (icol == -1) return;
             // 快路径 1:已经是目标色 -> 立刻返回。稳定态下这是绝大多数帧走的分支,
             // 必须放在任何资源名查询/父链遍历之前。
+            //
+            // 2026-10-04 修复(主人反馈"底栏图标染色有时恢复原样"):判定必须**同时校验
+            // view 层 tint 与 drawable 层 colorFilter**。
+            //
+            // 原实现只看 drawable.getColorFilter(),而染色时是两处都设
+            // (setImageTintList + drawable.setColorFilter)。三星在切页/重建底栏时
+            // 可能只重置其中一处(常见是复用 ImageView 时 view 层 tint 被清掉,
+            // 而 drawable 的 colorFilter 仍是旧值) —— 此时旧判定认为"已染好"直接
+            // return,不再重染,于是图标显示回原色。这正是"时好时坏"的成因。
+            //
+            // 现在两处都必须是目标色才算"已染好",任一不符就走后面的重染路径。
             try {
                 android.graphics.drawable.Drawable d0 = iv.getDrawable();
+                boolean drawableOk = false;
                 if (d0 != null) {
                     android.graphics.ColorFilter cf0 = d0.getColorFilter();
                     if (cf0 instanceof android.graphics.PorterDuffColorFilter
-                            && reflectColorFilterColor(cf0) == icol) return;
+                            && reflectColorFilterColor(cf0) == icol) {
+                        drawableOk = true;
+                    }
                 }
+                // view 层 tint 校验:getImageTintList() 为 null 或颜色不符 => 未染好。
+                // 注意 drawable==null 的情况(浏览助手等靠 background 染色的图标):
+                // 此时 drawableOk 为 false,会走后面的 background 染色分支,符合预期。
+                boolean viewTintOk = false;
+                try {
+                    android.content.res.ColorStateList tl = iv.getImageTintList();
+                    if (tl != null) {
+                        // 目标色是纯色,直接取默认态颜色比对
+                        viewTintOk = (tl.getDefaultColor() == icol);
+                    }
+                } catch (Throwable ignored) {}
+                if (drawableOk && viewTintOk) return;
             } catch (Throwable ignored) {}
             // 快路径 2:此前已判定"不该染"(网页内容图/缩略图/非浏览器 UI 图标)-> 直接返回。
             try {

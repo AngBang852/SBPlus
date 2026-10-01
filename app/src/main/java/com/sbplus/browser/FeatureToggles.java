@@ -88,8 +88,17 @@ final class FeatureToggles {
         String feature = featureOf(toggleKey);
         if (feature == null) return -1;
         if (enabled) {
-            // 打开方向：清除撤销标记，并提示需要重启才能真正恢复。
-            if (HookRegistry.clearRevoked(feature)) {
+            // 打开方向分两步：
+            // ① 清除"已撤销"标记 —— 让下次启动能正常注册；
+            boolean wasRevoked = HookRegistry.clearRevoked(feature);
+            // ② 恢复状态标记 —— 否则菜单会一直错误地显示"(失效)"。
+            //    这正是主人报的"关掉再打开显示失效，重启浏览器后才正常"的根因：
+            //    disableFeatureRuntime 把 sFeatureStatus 置为 false 供 featureDown 判断，
+            //    而打开时原先只清了 REVOKED、没恢复它。
+            MainHook.markFeatureReEnabled(feature);
+            if (wasRevoked) {
+                // 被 unhook 的方法在本进程内无法重新 hook（libxposed 无此接口），
+                // 故必须提示重启。
                 MainHook.toastOnMainPublic(MainHook.T("该功能需要重启浏览器后生效",
                         "This feature needs a browser restart to take effect"));
             }
