@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 状态圆点：已激活但作用域未勾选（橙，需用户处理） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="@color/warning" />
+    <size
+        android:width="10dp"
+        android:height="10dp" />
+</shape>

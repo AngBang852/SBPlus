@@ -4,11 +4,40 @@ plugins {
 
 android {
     namespace 'com.sbplus.browser'
-    compileSdk 34
+    // 2026-10-04 升级：34 → 37。
+    // 原因：libxposed:service:102.0.0（用于读取模块激活状态与作用域）的 AAR 元数据
+    // 要求 compileSdk ≥ 37。
+    //
+    // 注意用的是**新版带次版本号的 DSL**，不是旧的 `compileSdk 37`：
+    // 新版 SDK 把 Android 37 的平台目录装成了 `platforms/android-37.0`
+    // （source.properties 里 AndroidVersion.ApiLevel=37.0），旧的整数写法会去找
+    // `android-37` 而报 "Failed to find target with hash string 'android-37'"。
+    // 必须用 compileSdk { version = release(37) { minorApiLevel = 0 } } 才能匹配到。
+    //
+    // targetSdk 保持 34 不动：升 targetSdk 会引入 Android 14/15 的行为变更
+    // （前台服务类型、存储权限、后台限制等），那是独立的一次改动，不应与
+    // "加个状态显示"混在一起。compileSdk 只影响"能调用哪些 API"，
+    // 不改变运行时行为，故单独升级是安全的。
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
 
     defaultConfig {
         applicationId "com.sbplus.browser"
-        minSdk 24
+        // 2026-10-04 升级：24 → 26。
+        // 原因：libxposed:service:102.0.0 的 AAR 声明 minSdk 26，Gradle 拒绝与 24 合并。
+        //
+        // 为什么定 26 而不是更高：
+        // 实测本机三星浏览器两个版本 —— 30.1.0.67 的 minSdk=30、29.1.5.3(beta) 的 minSdk=29。
+        // 即"能装上本模块所支持浏览器的设备"系统必然 ≥ API 29，故抬到 26 实际
+        // **一个用户都不会少**；而抬到 30 反而会排除 API 29 上跑 beta 浏览器的用户。
+        // 再往上（如"最新"的 37）会让模块几乎无法安装在任何现役设备上，不取。
+        //
+        // 注：本模块的兼容负担来自**浏览器版本**而非系统 API，已由 safeFeature 逐功能
+        // 隔离，因此提高 minSdk 并不会减少需要维护的兼容代码 —— 没有额外收益。
+        minSdk 26
         targetSdk 34
         versionCode 11
         versionName "2.6.0"
@@ -76,6 +105,18 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
+        // 2026-10-04 新增：开启 core library desugaring。
+        //
+        // 原因：libxposed:service:102.0.0 内部使用了 Java Record（其 HookedTarget$State
+        // 等类型由 record 编译而来）。D8 在把该 AAR 转 dex 时报
+        //   "Invalid build configuration. Attempt to create a global synthetic for
+        //    'Record desugaring' without a global-synthetics consumer."
+        // —— Record 脱糖需要 desugaring 管线来承接它生成的全局合成类。
+        // 开启 coreLibraryDesugaring 即提供该承接者。
+        //
+        // 注意：必须同时声明 dependencies 里的 desugar_jdk_libs，否则 Gradle 会报
+        // "coreLibraryDesugaring is enabled but no desugar_jdk_libs dependency"。
+        coreLibraryDesugaringEnabled true
     }
 }
 
@@ -83,9 +124,30 @@ dependencies {
     // LSPosed 新 API（compileOnly，运行时由 LSPosed 框架提供）
     compileOnly files('libs/libxposed-api-102.jar')
 
+    // 2026-10-04 新增：libxposed service —— 在模块进程内读取**激活状态与作用域**。
+    //
+    // 为什么需要它：LSPosed 会把 XposedService 绑定到模块进程，从中可读到
+    //   · getFrameworkName/Version  —— 框架名与版本（service 为空即代表未激活）
+    //   · getScope()                —— 模块作用域列表（判断是否勾选了三星浏览器）
+    // 这是官方提供的正路，比"靠 hook 写标记、界面再读日志"可靠得多。
+    // 参考实现：WeKit（github.com/Ujhhgtg/WeKit）的 HookStatus 用的就是这套。
+    //
+    // **版本选择说明**：用 102.0.0（与项目现有的 libxposed-api-102.jar 同版本）。
+    // 102 的 HotReloadResult 是 Java Record 编译产物，Record 脱糖需要"全局合成类"，
+    // 而 AGP 默认在 dex 化外部库时不生成它 —— 已在 gradle.properties 里通过
+    // android.enableGlobalSyntheticsGeneration=true 解决（详见该文件注释）。
+    // 不必降级到 101：101 反而多依赖 kotlin-stdlib，且缺少 HookedTarget
+    // （getRunningTargets 需要它，可用来判断浏览器是否已加载模块）。
+    implementation 'io.github.libxposed:service:102.0.0'
+
     // 旧 Xposed API 已移除，XC_MethodHook/MethodHookParam 使用自实现（非 stub）
 
     // androidx.fragment（compileOnly：运行时由目标应用三星浏览器提供，
     // 编译期仅需能解析 android x.fragment.app.Fragment 基类）
     compileOnly 'androidx.fragment:fragment:1.6.2'
+
+    // 2026-10-04 新增：core library desugaring 的运行时库。
+    // 配合 compileOptions.coreLibraryDesugaringEnabled —— 承接 libxposed:service
+    // 里 Java Record 脱糖生成的全局合成类（详见 compileOptions 处的说明）。
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
 }

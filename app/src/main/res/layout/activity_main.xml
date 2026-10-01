@@ -32,44 +32,83 @@
         android:paddingTop="24dp"
         android:paddingBottom="32dp">
 
-        <!-- ========== 头部：应用名 + 一句话定位 ========== -->
+        <!-- ========== 头部：应用名 + 一句话定位（2026-10-04 按主人要求去掉图标）========== -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
+            android:orientation="vertical"
             android:paddingBottom="20dp">
 
-            <ImageView
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:src="@mipmap/ic_launcher"
-                android:contentDescription="@string/app_name" />
-
-            <LinearLayout
-                android:layout_width="0dp"
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:layout_marginStart="12dp">
+                android:text="@string/app_name"
+                android:textColor="@color/text_primary"
+                android:textSize="26sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.02" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="三星浏览器增强模块 · LSPosed"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- ========== 卡片 0：激活状态（2026-10-04 新增）========== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="激活状态"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:letterSpacing="0.08" />
+
+            <!-- 状态圆点 + 主状态文字（横排） -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="10dp">
+
+                <View
+                    android:id="@+id/dot_status"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:background="@drawable/bg_status_dot" />
 
                 <TextView
-                    android:layout_width="wrap_content"
+                    android:id="@+id/tv_status"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:text="@string/app_name"
+                    android:layout_weight="1"
+                    android:layout_marginStart="10dp"
+                    android:text="检测中…"
                     android:textColor="@color/text_primary"
-                    android:textSize="22sp"
-                    android:textStyle="bold"
-                    android:letterSpacing="0.02" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="三星浏览器增强模块 · LSPosed"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
             </LinearLayout>
+
+            <!-- 状态明细：框架信息 / 作用域 / 运行状态 -->
+            <TextView
+                android:id="@+id/tv_status_detail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="正在读取框架信息…"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="3dp" />
         </LinearLayout>
 
         <!-- ========== 卡片 1：版本状态 ========== -->
@@ -77,6 +116,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
+            android:layout_marginTop="12dp"
             android:background="@drawable/bg_card"
             android:padding="16dp">
 

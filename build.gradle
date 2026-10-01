@@ -8,6 +8,11 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.5.2'
+        // 2026-10-04 升级：8.5.2 → 8.13.0。
+        // 原因：libxposed:service:102.0.0（用于读取模块激活状态与作用域）要求
+        // compileSdk ≥ 37，而 AGP 8.5.2 最高只支持 compileSdk 34。
+        // 选 8.13.0 而非 9.x：9.x 是破坏性大版本（DSL/依赖解析均有变更），
+        // 8.13 已足够支持 compileSdk 37，升级风险低得多。
+        classpath 'com.android.tools.build:gradle:8.13.0'
     }
 }

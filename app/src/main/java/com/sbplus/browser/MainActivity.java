@@ -25,6 +25,107 @@ public class MainActivity extends Activity {
 
     private TextView mVersionView;
 
+    /** 激活状态三件套（2026-10-04 新增）。 */
+    private android.view.View mStatusDot;
+    private TextView mStatusView;
+    private TextView mStatusDetailView;
+
+    /**
+     * 服务绑定是**异步**的：首次打开界面时 registerListener 刚注册，
+     * XposedService 往往还没绑定完，此刻读到的是"未激活"。
+     * 若只靠 onResume 刷新，用户会看到一个错误的"未激活"并一直停在那里。
+     * 故注册监听器，绑定完成时自动重刷。
+     */
+    private final ModuleStatus.Listener mStatusListener = new ModuleStatus.Listener() {
+        @Override
+        public void onStatusChanged() {
+            runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    if (!isFinishing() && !isDestroyed()) refreshModuleStatus();
+                }
+            });
+        }
+    };
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 用户很可能是"去 LSPosed 勾选作用域后再回来"——回到前台时刷新一次，
+        // 否则界面还停留在上次的旧状态，会让人以为没生效。
+        ModuleStatus.addListener(mStatusListener);
+        refreshModuleStatus();
+    }
+
+    @Override
+    protected void onPause() {
+        ModuleStatus.removeListener(mStatusListener);
+        super.onPause();
+    }
+
+    /**
+     * 刷新激活状态显示。
+     *
+     * <p>三态文案刻意写明"下一步该做什么" —— 只说"未激活"对用户没有帮助，
+     * 说清"去 LSPosed 启用"才是可执行的。
+     */
+    private void refreshModuleStatus() {
+        if (mStatusView == null) return;
+        try {
+            ModuleStatus.State st = ModuleStatus.getState();
+            switch (st) {
+                case ACTIVE_READY: {
+                    boolean canQuery = ModuleStatus.canQueryRunningTargets();
+                    boolean running = canQuery && ModuleStatus.isBrowserRunning();
+                    mStatusDot.setBackgroundResource(R.drawable.dot_ok);
+                    mStatusView.setText("已激活");
+                    StringBuilder sb = new StringBuilder();
+                    String fw = ModuleStatus.getFrameworkName();
+                    String fv = ModuleStatus.getFrameworkVersion();
+                    if (!fw.isEmpty()) {
+                        sb.append("框架：").append(fw);
+                        if (!fv.isEmpty()) sb.append(" ").append(fv);
+                        sb.append('\n');
+                    }
+                    sb.append("作用域：已包含三星浏览器\n");
+                    if (!canQuery) {
+                        // getRunningTargets 需要框架 API 102+；旧框架下无法查询，
+                        // 这里必须说"未知"而不是"未运行" —— 后者是错误结论。
+                        sb.append("浏览器：运行状态未知（框架版本较低，无法查询）");
+                    } else {
+                        sb.append(running
+                                ? "浏览器：正在运行，模块已加载"
+                                : "浏览器：未在运行（打开浏览器后模块才会加载）");
+                    }
+                    mStatusDetailView.setText(sb.toString());
+                    break;
+                }
+                case ACTIVE_NO_SCOPE: {
+                    mStatusDot.setBackgroundResource(R.drawable.dot_warn);
+                    mStatusView.setText("已启用，但作用域未勾选");
+                    StringBuilder sb = new StringBuilder();
+                    String fw = ModuleStatus.getFrameworkName();
+                    if (!fw.isEmpty()) sb.append("框架：").append(fw).append('\n');
+                    sb.append("请在 LSPosed 中勾选「三星浏览器」作为作用域，然后重启浏览器。");
+                    mStatusDetailView.setText(sb.toString());
+                    break;
+                }
+                default: {
+                    mStatusDot.setBackgroundResource(R.drawable.dot_err);
+                    mStatusView.setText("未激活");
+                    mStatusDetailView.setText(
+                            "未检测到框架服务。请确认：\n"
+                                    + "① 已在 LSPosed 中启用本模块；\n"
+                                    + "② 作用域已勾选「三星浏览器」；\n"
+                                    + "③ 已重启三星浏览器。");
+                    break;
+                }
+            }
+        } catch (Throwable t) {
+            mStatusView.setText("状态未知");
+            mStatusDetailView.setText("读取失败：" + t);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -49,6 +150,16 @@ public class MainActivity extends Activity {
         TextView projectView = findViewById(R.id.tv_project);
         Button openSettingsBtn = findViewById(R.id.btn_open_settings);
         Button openLogsBtn = findViewById(R.id.btn_open_logs);
+
+        // 2026-10-04 新增：激活状态显示。
+        // 用户装上模块后最常见的问题是"怎么没反应"，而原因通常只有三种：
+        // ① 没在 LSPosed 里启用；② 启用了但没勾选三星浏览器作用域；③ 都对了但浏览器未重启。
+        // 这三种状态原先在界面上完全看不出来，用户只能靠"功能有没有生效"去猜。
+        mStatusDot = findViewById(R.id.dot_status);
+        mStatusView = findViewById(R.id.tv_status);
+        mStatusDetailView = findViewById(R.id.tv_status_detail);
+        ModuleStatus.init(this);
+        refreshModuleStatus();
 
         mVersionView.setText("版本 " + BuildConfig.VERSION_NAME);
 
