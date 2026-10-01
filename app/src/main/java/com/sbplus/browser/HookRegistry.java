@@ -116,6 +116,36 @@ final class HookRegistry {
     }
 
     /**
+     * 为 hook 生成稳定且唯一的 id（2026-10-04 新增）。
+     *
+     * <p>格式：{@code sbplus:<功能名>:<类名>#<方法名>}。
+     *
+     * <p><b>为什么要"稳定"</b>：官方说明同一模块在同一方法上用**相同 id** 注册的新 hook
+     * 会原子替换旧 hook。热重载时新代码用同样的 id 重挂，就能做到"无空窗替换"；
+     * 若 id 每次不同（例如含随机数/时间戳），就退化成"新旧并存"或需要先撤后挂
+     * （后者在两步之间存在 hook 不生效的间隙）。
+     *
+     * <p><b>为什么要"唯一"</b>：id 只需在同一模块 + 同一 executable 上唯一，
+     * 而"功能名 + 类名 + 方法名"已满足该约束（同一功能不会对同一方法挂两次，
+     * 若真挂了两次，那正是应当被替换的场景）。
+     *
+     * <p>不在 {@code safeFeature} 上下文里注册的 hook（{@code __ungrouped__}）
+     * 仍会得到 id，只是功能名段为哨兵值。
+     */
+    static String buildHookId(java.lang.reflect.Executable exec) {
+        if (exec == null) return null;
+        String feature = CURRENT_FEATURE.get();
+        if (feature == null) feature = "__ungrouped__";
+        try {
+            String cls = exec.getDeclaringClass() == null ? "?" : exec.getDeclaringClass().getName();
+            String name = exec.getName();
+            return "sbplus:" + feature + ":" + cls + "#" + name;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
      * 登记一个 handle。
      *
      * <p>若当前功能已被撤销，则**立即撤销**这个新 handle 并返回 false —— 否则会出现

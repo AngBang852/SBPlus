@@ -927,10 +927,65 @@ private static final String[] RANDOM_UAS = new String[]{
                 MainModule.logMsg("[SBPlus] setExceptionMode unsupported: " + t);
             }
         }
+        // 2026-10-04：设置 hook 优先级与唯一 id（见下方说明）。
+        builder = applyPriorityAndId(builder, exec);
         HookRegistry.register(builder.intercept(hooker));
     }
 
+    /**
+     * 给 hook 设置优先级与唯一 id（2026-10-04 新增）。
+     *
+     * <p><b>① 优先级</b>：官方语义是"priority 高的先被调用"（默认 {@code PRIORITY_DEFAULT=50}）。
+     * 本模块统一设为 {@link io.github.libxposed.api.XposedInterface#PRIORITY_LOWEST}，
+     * 理由是<b>本模块是"增强"而非"核心功能"</b>：三星浏览器上可能同时装着别的模块
+     * （实测该设备上就有 Thanox、AppFreezer 等），若本模块的 hook 抢先执行，
+     * 可能让其它模块看到被本模块改过的参数/结果，从而互相干扰。
+     * 放到最低优先级意味着"别人先跑、我们最后兜底"，冲突面最小。
+     *
+     * <p>注意这与 {@code proceedWithArgs} 的行为一致：本模块的 hook 仍然会
+     * 把改动后的参数传给后续链（{@code chain.proceed(args)}），因此低优先级
+     * 并不等于"改动被忽略"，只是<b>执行顺序靠后</b>。
+     *
+     * <p><b>② 唯一 id</b>：官方说明同一模块在同一方法上用相同 id 注册的新 hook 会
+     * <b>原子替换</b>旧 hook（旧 handle 立即失效）。这对本项目有两个实际好处：
+     * <ul>
+     *   <li><b>热重载时无空窗</b>：重挂 hook 走"同 id 替换"而不是"先撤后挂"，
+     *       后者在两步之间存在 hook 不生效的间隙；</li>
+     *   <li><b>诊断可辨识</b>：id 形如 {@code sbplus:<功能名>:<方法签名>}，
+     *       多模块共存排查时能一眼看出是哪个功能挂的。</li>
+     * </ul>
+     *
+     * <p>id 由 {@link HookRegistry} 生成 —— 它知道"当前正在注册哪个功能"
+     * （ThreadLocal 上下文），因此能产出稳定且唯一的名字。
+     */
+    private static io.github.libxposed.api.XposedInterface.HookBuilder applyPriorityAndId(
+            io.github.libxposed.api.XposedInterface.HookBuilder builder,
+            java.lang.reflect.Executable exec) {
+        try {
+            builder = builder.setPriority(
+                    io.github.libxposed.api.XposedInterface.PRIORITY_LOWEST);
+        } catch (Throwable t) {
+            if (!sPriorityWarned) {
+                sPriorityWarned = true;
+                MainModule.logMsg("[SBPlus] setPriority unsupported: " + t);
+            }
+        }
+        try {
+            String id = HookRegistry.buildHookId(exec);
+            if (id != null) builder = builder.setId(id);
+        } catch (Throwable t) {
+            // setId 是 API 102 新增 —— 旧框架不认时降级（只影响热重载无空窗这一项）。
+            if (!sHookIdWarned) {
+                sHookIdWarned = true;
+                MainModule.logMsg("[SBPlus] setId unsupported: " + t);
+            }
+        }
+        return builder;
+    }
+
     private static volatile boolean sExceptionModeWarned = false;
+    private static volatile boolean sPriorityWarned = false;
+    private static volatile boolean sHookIdWarned = false;
 
     public static void hookMethod(java.lang.reflect.Method m, XC_MethodHook callback) {
         // 2026-10-04：统一走 hookRegistered（设置 PROTECTIVE 异常模式 + 登记 handle）
@@ -997,9 +1052,72 @@ private static final String[] RANDOM_UAS = new String[]{
     public static Object callMethod(Object obj, String name, Object... args) {
         try {
             java.lang.reflect.Method m = resolveMethod(obj.getClass(), name, args, true);
-            return m.invoke(obj, args);
+            return invokeOrigin(m, obj, args);
         } catch (java.lang.reflect.InvocationTargetException e) { throw new RuntimeException(e.getCause()); }
           catch (Throwable t) { throw new RuntimeException(t); }
+    }
+
+    /**
+     * 调用方法的**原始实现**（绕过 hook 链）（2026-10-04 新增）。
+     *
+     * <p><b>为什么改用 libxposed 的 Invoker 而不是 {@code Method.invoke}</b>：
+     * 两者在"被其它模块 hook 过的目标方法"上语义不同 ——
+     * <ul>
+     *   <li>{@code Method.invoke} 会<b>正常走 hook 链</b>，即本模块的内部调用
+     *       可能被别的模块拦下、改参数、改返回值；</li>
+     *   <li>{@code Invoker} 设为 {@link io.github.libxposed.api.XposedInterface.Invoker.Type.Origin}
+     *       时<b>明确跳过全部 hook</b>，拿到的是宿主方法的真实行为。</li>
+     * </ul>
+     * 本模块大量使用反射去读取宿主状态（{@code getObjectField}/{@code callMethod}），
+     * 目的是<b>观察真实状态</b>；若这些观察被第三方模块干扰，本模块的逻辑就会
+     * 基于被篡改的值做判断。故这里明确选择 ORIGIN。
+     *
+     * <p><b>性能说明</b>：这不是性能优化。反射查找早已被 {@code sMethodCache} 缓存，
+     * Invoker 的收益主要在"免访问检查"与语义明确上；本方法的开销与
+     * {@code Method.invoke} 同量级。
+     *
+     * <p>降级：旧框架不提供 {@code getInvoker} 时退回 {@code Method.invoke}
+     * （语义差异只在"有其它模块 hook 同一方法"时才显现）。
+     */
+    private static Object invokeOrigin(java.lang.reflect.Method m, Object obj, Object[] args)
+            throws Throwable {
+        io.github.libxposed.api.XposedInterface.Invoker<?, java.lang.reflect.Method> inv =
+                invokerFor(m);
+        if (inv != null) {
+            return inv.invoke(obj, args);
+        }
+        return m.invoke(obj, args);
+    }
+
+    /** Method → Invoker 缓存（Type.ORIGIN）。键用 Method 自身，构造开销只在首次。 */
+    private static final java.util.concurrent.ConcurrentHashMap<java.lang.reflect.Method,
+            io.github.libxposed.api.XposedInterface.Invoker<?, java.lang.reflect.Method>>
+            sInvokerCache = new java.util.concurrent.ConcurrentHashMap<java.lang.reflect.Method,
+            io.github.libxposed.api.XposedInterface.Invoker<?, java.lang.reflect.Method>>();
+
+    private static volatile boolean sInvokerWarned = false;
+
+    private static io.github.libxposed.api.XposedInterface.Invoker<?, java.lang.reflect.Method>
+            invokerFor(java.lang.reflect.Method m) {
+        if (m == null || MainModule.sInstance == null) return null;
+        io.github.libxposed.api.XposedInterface.Invoker<?, java.lang.reflect.Method> cached =
+                sInvokerCache.get(m);
+        if (cached != null) return cached;
+        try {
+            io.github.libxposed.api.XposedInterface.Invoker<?, java.lang.reflect.Method> inv =
+                    MainModule.sInstance.getInvoker(m);
+            // 显式设为 ORIGIN：跳过全部 hook，拿宿主真实行为（见 invokeOrigin 说明）。
+            inv = inv.setType(io.github.libxposed.api.XposedInterface.Invoker.Type.ORIGIN);
+            sInvokerCache.put(m, inv);
+            return inv;
+        } catch (Throwable t) {
+            // 旧框架无 getInvoker，或该方法不可 invoker 化 —— 降级为 Method.invoke。
+            if (!sInvokerWarned) {
+                sInvokerWarned = true;
+                MainModule.logMsg("[SBPlus] getInvoker unsupported, falling back: " + t);
+            }
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------ 反射解析缓存
