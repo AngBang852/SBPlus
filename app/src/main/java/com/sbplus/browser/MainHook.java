@@ -798,7 +798,8 @@ private static final String[] RANDOM_UAS = new String[]{
             for (int i = 0; i < paramTypes.length; i++) paramTypes[i] = (Class<?>) args[i];
             java.lang.reflect.Constructor<?> c = clazz.getDeclaredConstructor(paramTypes);
             c.setAccessible(true);
-            MainModule.sInstance.hook(c).intercept(chain -> {
+            // 2026-10-04：统一走 hookRegistered（设置 PROTECTIVE 异常模式 + 登记 handle）
+            hookRegistered(c, chain -> {
                 MethodHookParam param = newMethodHookParam();
 
                 param.thisObject = chain.getThisObject();
@@ -823,8 +824,48 @@ private static final String[] RANDOM_UAS = new String[]{
         } catch (Throwable t) { throw new RuntimeException(t); }
     }
 
+    /**
+     * 统一的 hook 注册入口：设置异常模式 + 登记 handle。
+     *
+     * <p>2026-10-04 新增，用于集中处理两件事：
+     *
+     * <p><b>① 异常模式设为 PROTECTIVE</b>：libxposed 提供三种模式 ——
+     * <ul>
+     *   <li>{@code DEFAULT} —— 框架自行决定；</li>
+     *   <li>{@code PROTECTIVE} —— hook 内抛出的异常被框架捕获并记录，**不影响宿主**；</li>
+     *   <li>{@code PASSTHROUGH} —— 异常原样传播给宿主调用方。</li>
+     * </ul>
+     * 本模块是"增强"而非"核心功能"，任何 hook 出错都**不该**让浏览器崩溃或行为异常，
+     * 因此统一用 PROTECTIVE。这与 {@code safeFeature} 的隔离思路一致，但更彻底 ——
+     * safeFeature 只能拦住"注册期"的异常，"运行期"（每次调用 hook 时）的异常原先
+     * 只能靠每个回调内部手写 try/catch，漏一处就会透传到宿主。
+     *
+     * <p><b>② 登记 HookHandle</b>：交给 {@link HookRegistry} 以便按功能撤销。
+     *
+     * @param exec 目标方法/构造器
+     * @param hooker 拦截逻辑
+     */
+    private static void hookRegistered(java.lang.reflect.Executable exec,
+                                       io.github.libxposed.api.XposedInterface.Hooker hooker) {
+        io.github.libxposed.api.XposedInterface.HookBuilder builder = MainModule.sInstance.hook(exec);
+        try {
+            builder = builder.setExceptionMode(
+                    io.github.libxposed.api.XposedInterface.ExceptionMode.PROTECTIVE);
+        } catch (Throwable t) {
+            // 旧框架可能不认该模式 —— 降级为默认，不影响功能，只记一次日志。
+            if (!sExceptionModeWarned) {
+                sExceptionModeWarned = true;
+                MainModule.logMsg("[SBPlus] setExceptionMode unsupported: " + t);
+            }
+        }
+        HookRegistry.register(builder.intercept(hooker));
+    }
+
+    private static volatile boolean sExceptionModeWarned = false;
+
     public static void hookMethod(java.lang.reflect.Method m, XC_MethodHook callback) {
-        MainModule.sInstance.hook(m).intercept(chain -> {
+        // 2026-10-04：统一走 hookRegistered（设置 PROTECTIVE 异常模式 + 登记 handle）
+        hookRegistered(m, chain -> {
             MethodHookParam param = newMethodHookParam();
             param.method = m;
             param.thisObject = chain.getThisObject();
@@ -1110,7 +1151,8 @@ private static final String[] RANDOM_UAS = new String[]{
             m.setAccessible(true);
             // lambda 捕获要求 effectively-final,故用 final 变量承接(与 findAndHookMethod 一致)
             final java.lang.reflect.Method fm = m;
-            MainModule.sInstance.hook(fm).intercept(chain -> {
+            // 2026-10-04：统一走 hookRegistered（设置 PROTECTIVE 异常模式 + 登记 handle）
+            hookRegistered(fm, chain -> {
                 MethodHookParam param = newMethodHookParam();
                 param.method = fm;
                 param.thisObject = chain.getThisObject();
@@ -1141,7 +1183,8 @@ private static final String[] RANDOM_UAS = new String[]{
             for (int i = 0; i < paramTypes.length; i++) paramTypes[i] = (Class<?>) args[i];
             java.lang.reflect.Method m = clazz.getDeclaredMethod(methodName, paramTypes);
             m.setAccessible(true);
-            MainModule.sInstance.hook(m).intercept(chain -> {
+            // 2026-10-04：统一走 hookRegistered（设置 PROTECTIVE 异常模式 + 登记 handle）
+            hookRegistered(m, chain -> {
                 MethodHookParam param = newMethodHookParam();
                 param.method = m;
                 param.thisObject = chain.getThisObject();
@@ -1251,9 +1294,23 @@ private static final String[] RANDOM_UAS = new String[]{
             new java.util.LinkedHashMap<String, Boolean>();
 
     /** 注册一个功能的 hook,吞掉一切 Throwable(含 NoClassDefFoundError / NoSuchMethodError),
-     *  保证单个功能失效不影响其它功能,也不会让浏览器进程崩溃。 */
+     *  保证单个功能失效不影响其它功能,也不会让浏览器进程崩溃。
+     *
+     *  <p>2026-10-04：同时作为 hook 的**功能归组边界** —— 注册期间通过
+     *  {@link HookRegistry#beginFeature} 标记当前功能名，各注册入口据此把
+     *  {@code HookHandle} 记到该功能名下。这样 {@link HookRegistry#revokeFeature}
+     *  就能"按功能"撤销全部 hook，实现**关闭功能无需重启浏览器**。
+     *
+     *  <p>若该功能此前已被撤销（用户在设置里关掉了它），这里**跳过注册** ——
+     *  否则浏览器进程重启后会把它重新激活，与用户的选择相反。 */
     private static void safeFeature(String name, Runnable register) {
         boolean ok = false;
+        if (HookRegistry.isRevoked(name)) {
+            MainModule.logMsg("[SBPlus] feature SKIPPED (revoked by user) '" + name + "'");
+            synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
+            return;
+        }
+        HookRegistry.beginFeature(name);
         try {
             register.run();
             ok = true;
@@ -1261,8 +1318,31 @@ private static final String[] RANDOM_UAS = new String[]{
             // 包括 Error(NoClassDefFoundError/NoSuchMethodError),浏览器改版时最常见。
             MainModule.logMsg("[SBPlus] feature DISABLED '" + name + "': " + t);
             try { LogWriter.log("core", "feature disabled " + name + ": " + t); } catch (Throwable ignored) {}
+        } finally {
+            HookRegistry.endFeature();
         }
         synchronized (sFeatureStatus) { sFeatureStatus.put(name, ok); }
+    }
+
+    /**
+     * 运行时关闭某个功能（撤销它注册的全部 hook）。
+     *
+     * <p>2026-10-04 新增。用户可感的改进：以前在设置里关掉一个功能后，
+     * 已注册的 hook 仍在运行，必须**重启浏览器**才真正停止；现在立即生效。
+     *
+     * @return 实际撤销的 hook 数量；0 表示该功能没有已注册的 hook
+     */
+    public static int disableFeatureRuntime(String name) {
+        int n = HookRegistry.revokeFeature(name);
+        synchronized (sFeatureStatus) { sFeatureStatus.put(name, false); }
+        MainModule.logMsg("[SBPlus] feature revoked at runtime '" + name + "', hooks=" + n);
+        try { LogWriter.log("core", "feature revoked at runtime " + name + " hooks=" + n); } catch (Throwable ignored) {}
+        return n;
+    }
+
+    /** 某功能当前注册了多少个 hook（诊断用）。 */
+    public static int hookCountOf(String name) {
+        return HookRegistry.countOf(name);
     }
 
     /** 某功能当前是否可用(供业务逻辑在调用前自检,避免在失效功能上继续动作)。 */
@@ -1921,7 +2001,8 @@ private static final String[] RANDOM_UAS = new String[]{
                 MainModule.logMsg("[SBPlus] onBindViewHolder not found");
                 return;
             }
-            MainModule.sInstance.hook(m).intercept(chain -> {
+            // 2026-10-04：统一走 hookRegistered（设置 PROTECTIVE 异常模式 + 登记 handle）
+            hookRegistered(m, chain -> {
                 Object result = chain.proceed();
                 try {
                     decoratePickerRow(chain.getThisObject(), chain.getArg(0));
@@ -19613,9 +19694,33 @@ private static void showUaGroupDialog(final Context ctx) {
 
     private static void syncToolbarIconsForHomeState(Object layoutObj) {
         try {
-            Object urlBarParent = getObjectField(layoutObj, "mUrlBarParent");
-            if (!(urlBarParent instanceof android.view.ViewGroup)) return;
-            android.view.ViewGroup parent = (android.view.ViewGroup) urlBarParent;
+            // 2026-10-04 修复：mUrlBarParent 只是"用来缓存父容器"的**可选优化**，
+            // 不是功能必需 —— 取不到时应安静降级（直接用 layoutObj 自身作为查找范围），
+            // 而不是当成错误。
+            //
+            // 背景：这个方法由 onLayout hook 驱动（每帧级触发）。原实现用
+            // getObjectField 读字段，而该方法在字段不存在时**抛异常**，异常被下面的
+            // catch 记成 err 日志 —— 于是在浏览器 30.1.0.67（该字段已改名/移除）上
+            // 会**每次布局都刷一条 NoSuchFieldException**。实测日志里同一错误连刷十几条。
+            //
+            // 注：这个 hook 此前因"只查本类"从未真正触发过，所以这个 bug 一直藏着；
+            // 修好父类查找后它才开始运行，问题才暴露 —— 这也说明 PROTECTIVE 异常模式
+            // 的价值：错误可见，而不是崩溃或静默。
+            android.view.ViewGroup parent = null;
+            try {
+                Object urlBarParent = getObjectField(layoutObj, "mUrlBarParent");
+                if (urlBarParent instanceof android.view.ViewGroup) {
+                    parent = (android.view.ViewGroup) urlBarParent;
+                }
+            } catch (Throwable ignored) {
+                // 字段不存在（浏览器改版）→ 走下面的兜底
+            }
+            if (parent == null && layoutObj instanceof android.view.ViewGroup) {
+                // 兜底：用 layoutObj 自身。它正是被 hook 的 LocationBarButtonLayout，
+                // 图标按钮就挂在它（或其子树）上，findViewWithTag 会向下递归查找。
+                parent = (android.view.ViewGroup) layoutObj;
+            }
+            if (parent == null) return;
             sToolbarParentCache = parent;
             // 判断当前是否主页/新标签页
             boolean home = isHomeUrl(sCurrentUrl);
