@@ -206,14 +206,59 @@ public class HomeLogoHelper {
         return -1;
     }
 
+    /**
+     * 保存 Logo 文件名列表。
+     *
+     * <p>2026-10-04 修复:由"逗号拼接"改为 **JSON 数组**。
+     * 原实现把列表用 {@code ","} 连成一个字符串存进 prefs,读取时再 split(",") ——
+     * 一旦某个文件名本身含逗号(用户导入的图片名完全可能含逗号),列表就会被拆错,
+     * 表现为"某些 Logo 从列表里消失"或读到不存在的文件名。JSON 数组无此歧义。
+     *
+     * <p>兼容性:读取端同时支持两种格式 —— 先尝试按 JSON 解析,失败再退回旧的
+     * 逗号分隔(这样升级前的存量数据不会丢)。
+     */
     public static void saveList(Context ctx, List<String> list) {
-        StringBuilder sb = new StringBuilder();
-        for (String s : list) {
-            if (sb.length() > 0) sb.append(",");
-            sb.append(s);
-        }
         SharedPreferences sp = prefs(ctx);
-        if (sp != null) sp.edit().putString(KEY_LIST, sb.toString()).apply();
+        if (sp == null) return;
+        String encoded;
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray();
+            if (list != null) for (String s : list) if (s != null && !s.isEmpty()) arr.put(s);
+            encoded = arr.toString();
+        } catch (Throwable t) {
+            // 极端兜底:退回旧格式,保证功能不中断
+            StringBuilder sb = new StringBuilder();
+            if (list != null) for (String s : list) {
+                if (s == null || s.isEmpty()) continue;
+                if (sb.length() > 0) sb.append(",");
+                sb.append(s);
+            }
+            encoded = sb.toString();
+        }
+        sp.edit().putString(KEY_LIST, encoded).apply();
+    }
+
+    /** 解析 KEY_LIST:优先 JSON 数组,失败则按旧的逗号分隔解析(兼容存量数据)。 */
+    private static List<String> decodeList(String raw) {
+        List<String> out = new ArrayList<String>();
+        if (raw == null || raw.isEmpty()) return out;
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("[")) {
+            try {
+                org.json.JSONArray arr = new org.json.JSONArray(trimmed);
+                for (int i = 0; i < arr.length(); i++) {
+                    String s = arr.optString(i, "");
+                    if (!s.isEmpty()) out.add(s);
+                }
+                return out;
+            } catch (Throwable ignored) {
+                // 解析失败 → 落到下面的旧格式分支
+            }
+        }
+        for (String s : raw.split(",")) {
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
     }
 
     public static List<String> listLogos(Context ctx) {
@@ -221,11 +266,7 @@ public class HomeLogoHelper {
         try {
             SharedPreferences sp = prefs(ctx);
             String raw = sp != null ? sp.getString(KEY_LIST, "") : "";
-            if (raw != null && !raw.isEmpty()) {
-                for (String s : raw.split(",")) {
-                    if (!s.isEmpty()) res.add(s);
-                }
-            }
+            res.addAll(decodeList(raw));
             // 兜底: 目录里实际存在的文件
             // 2026-10-04 修复:过滤 .tmp 残留。
             // 保存 Logo 走"写 .tmp 再 rename"的原子落盘(见 saveFromUri),进程在

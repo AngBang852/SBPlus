@@ -312,10 +312,25 @@ public final class MenuReorderHelper {
         }
     }
 
+    // ---------------------------------------------------------------------------------
+    // View tag key(2026-10-04 修复)
+    //
+    // 原实现用裸 int 0x7f0f0001~3 作 tag key。0x7f 是 **Android 资源 id 的包前缀**,
+    // 即这三个 key 落在宿主应用的资源 id 空间内 —— 一旦三星浏览器某个真实资源 id
+    // 恰好等于其中之一, 宿主自己的 getTag/setTag 就会与本模块的标记互相覆盖
+    // (表现为: 编辑模式下图标点击恢复失效、✕ 标记错乱)。
+    //
+    // 改用 View.generateViewId() 在运行时生成: 它由系统保证不与任何已分配 id 冲突
+    // (API 17+, 本项目 minSdk 24)。用 static final 只生成一次, 保持"同一 key"语义。
+    // 注意: getTag(int) 需要资源 id 形态的 int, 不能用字符串, 故仍走 int 重载。
+    private static final int TAG_KEY_CLICKABLE = View.generateViewId();
+    private static final int TAG_KEY_POSITION = View.generateViewId();
+    private static final int TAG_KEY_MARK = View.generateViewId();
+
     private static void disableClickTree(View v) {
         if (v == null) return;
         if (v.isClickable()) {
-            v.setTag(0x7f0f0001, Boolean.TRUE);
+            v.setTag(TAG_KEY_CLICKABLE, Boolean.TRUE);
             v.setClickable(false);
         }
         if (v instanceof ViewGroup) {
@@ -342,9 +357,9 @@ public final class MenuReorderHelper {
 
     private static void restoreClickTree(View v) {
         if (v == null) return;
-        if (Boolean.TRUE.equals(v.getTag(0x7f0f0001))) {
+        if (Boolean.TRUE.equals(v.getTag(TAG_KEY_CLICKABLE))) {
             v.setClickable(true);
-            v.setTag(0x7f0f0001, null);
+            v.setTag(TAG_KEY_CLICKABLE, null);
         }
         if (v instanceof ViewGroup) {
             ViewGroup vg = (ViewGroup) v;
@@ -767,14 +782,14 @@ public final class MenuReorderHelper {
                 int pos = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
                 if (pos < 0 || sItems == null || pos >= sItems.size()) continue;
                 // Block the original click while editing (and remember its clickable state).
-                child.setTag(0x7f0f0001, Boolean.valueOf(child.isClickable()));
+                child.setTag(TAG_KEY_CLICKABLE, Boolean.valueOf(child.isClickable()));
                 child.setClickable(false);
                 // Remove any stale mark already on this (recycled) child, then re-draw.
                 View old = sRemoveMarks.remove(child);
                 if (old != null && old.getParent() instanceof ViewGroup) {
                     ((ViewGroup) old.getParent()).removeView(old);
                 }
-                child.setTag(0x7f0f0002, pos);
+                child.setTag(TAG_KEY_POSITION, pos);
                 addDeleteMark((ViewGroup) child, pos);
             }
             MainModule.logMsg("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items");
@@ -800,7 +815,7 @@ public final class MenuReorderHelper {
                         ViewGroup vg = (ViewGroup) child;
                         for (int j = vg.getChildCount() - 1; j >= 0; j--) {
                             View c = vg.getChildAt(j);
-                            Object marker = c.getTag(0x7f0f0003);
+                            Object marker = c.getTag(TAG_KEY_MARK);
                             if ("SBPlus-RemoveMark".equals(marker)) {
                                 vg.removeView(c);
                             }
@@ -826,7 +841,7 @@ public final class MenuReorderHelper {
             // recycled off-screen items can carry a stale mark back into view.
             for (int j = vg.getChildCount() - 1; j >= 0; j--) {
                 View c = vg.getChildAt(j);
-                if ("SBPlus-RemoveMark".equals(c.getTag(0x7f0f0003))) {
+                if ("SBPlus-RemoveMark".equals(c.getTag(TAG_KEY_MARK))) {
                     vg.removeView(c);
                     sRemoveMarks.remove(child);
                 }
@@ -837,7 +852,7 @@ public final class MenuReorderHelper {
             if (old != null && old.getParent() instanceof ViewGroup) {
                 ((ViewGroup) old.getParent()).removeView(old);
             }
-            child.setTag(0x7f0f0002, pos);
+            child.setTag(TAG_KEY_POSITION, pos);
             addDeleteMark((ViewGroup) child, pos);
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] decorateBoundItem error: " + t);
@@ -862,7 +877,7 @@ public final class MenuReorderHelper {
             mark.setBackground(bg);
             mark.setTag(pos);
             // Unique marker so we can reliably find and remove this ✕ later.
-            mark.setTag(0x7f0f0003, "SBPlus-RemoveMark");
+            mark.setTag(TAG_KEY_MARK, "SBPlus-RemoveMark");
 
         int iconId = rc.getResources().getIdentifier("icon", "id", rc.getPackageName());
         View icon = iconId != 0 ? child.findViewById(iconId) : null;
@@ -875,9 +890,20 @@ public final class MenuReorderHelper {
 
         // Wait until the icon is actually laid out (paged lazy layout means one post may not
         // be enough), then pin the ✕ to the icon's top-right corner using absolute coords.
+        //
+        // 2026-10-04 修复:加重试上限。原实现 `child.post(this)` 无上限 —— 若该图标
+        // 因任何原因永不完成布局(被回收、不可见、parent 已 detach),就会以每帧一次的
+        // 频率无限重排队,且每次重试都打一条日志,形成持续的主线程开销与日志刷屏。
+        // 上限取 60 次(约 1 秒@60fps),足够覆盖懒布局场景,超限后安静放弃(✕ 会留在
+        // 默认位置,不影响其它功能)。
+        final int[] pinTries = new int[]{ 0 };
         final Runnable pin = new Runnable() {
             @Override public void run() {
                 try {
+                    if (++pinTries[0] > 60) {
+                        MainModule.logMsg("[SBPlus] mark pin gave up after " + pinTries[0] + " tries");
+                        return;
+                    }
                     View ic = iconId != 0 ? child.findViewById(iconId) : null;
                     if (ic == null || ic.getWidth() <= 0) { child.post(this); return; }
                     int[] il = new int[2];
@@ -890,8 +916,8 @@ public final class MenuReorderHelper {
                     float y = Math.max(0f, iconTop);
                     mark.setX(x);
                     mark.setY(y);
-                    MainModule.logMsg("[SBPlus] mark pinned iconLeft=" + iconLeft
-                            + " iconTop=" + iconTop + " x=" + x + " y=" + y);
+                    // 注:定位成功是常态,原实现在这里每次都打一条日志 —— 编辑模式下
+                    // 每个图标各打一条,几十个图标就是几十行刷屏。移除。详见上方重试上限说明。
                 } catch (Throwable t) {
                     MainModule.logMsg("[SBPlus] mark pin error: " + t);
                 }

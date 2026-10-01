@@ -83,7 +83,8 @@ public final class MenuEditHelper {
     private static volatile boolean sAddItemHooked = false;
     private static volatile ClassLoader sAddItemCl = null;
     private static volatile int sIconCount = -1;
-    private static volatile int sPadCount = 0;
+    // 2026-10-04:sPadCount 已删除 —— 它恒为 0(唯一赋值处就是置 0),只被拼进两条
+    // 日志,是分页功能关闭后遗留的死变量。连同日志里的 "pad=" 字段一并清理。
     /** Hook adapter getItemCount/getItem/onBindViewHolder to render a trailing "+" cell. */
     public static void installGridAddItem(Object adapter, ClassLoader cl) {
         if (adapter == null) return;
@@ -98,7 +99,6 @@ public final class MenuEditHelper {
                     @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
                         int icons = (Integer) p.getResult();
                         sIconCount = icons;
-                        sPadCount = 0;
                         p.setResult(icons + 1); // icons + the "+" cell
                     }
                 });
@@ -116,8 +116,39 @@ public final class MenuEditHelper {
                             android.view.View iv = (android.view.View) MainHook.getObjectField(holder, "itemView");
                             if (iv == null) return;
                             try {
+                                // 2026-10-04 修复:列数不再硬编码 5。
+                                // 原实现 itemW = screenW / 5 —— 横屏、分屏、平板或宿主
+                                // 改了网格列数时,添加格子的宽度会与真实网格错位(要么
+                                // 撑出屏幕、要么明显偏窄)。这里改为:
+                                //   ① 若 RecyclerView 的 LayoutManager 暴露 spanCount,用它;
+                                //   ② 否则用"容器可用宽度 ÷ 已有子项宽度"推算列数;
+                                //   ③ 都拿不到才退回 5(与改动前行为一致)。
                                 int screenW = iv.getResources().getDisplayMetrics().widthPixels;
-                                int itemW = screenW / 5;
+                                int cols = 0;
+                                try {
+                                    android.view.View anchor = MenuReorderHelper.menuAnchorView();
+                                    if (anchor != null) {
+                                        int w = anchor.getWidth();
+                                        if (w > 0) {
+                                            // 用已有子项的实测宽度推算列数(最可靠:直接反映当前网格)
+                                            if (anchor instanceof android.view.ViewGroup) {
+                                                android.view.ViewGroup vg = (android.view.ViewGroup) anchor;
+                                                for (int ci = 0; ci < vg.getChildCount(); ci++) {
+                                                    android.view.View ch = vg.getChildAt(ci);
+                                                    if (ch != null && ch.getWidth() > 0) {
+                                                        int n = Math.round((float) w / ch.getWidth());
+                                                        if (n >= 1 && n <= 12) { cols = n; }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (cols == 0) cols = 5;   // 拿不到子项宽度 → 沿用旧假设
+                                            screenW = w;               // 用真实容器宽而非屏幕宽
+                                        }
+                                    }
+                                } catch (Throwable ignored) {}
+                                if (cols <= 0) cols = 5;
+                                int itemW = Math.max(1, screenW / cols);
                                 android.view.ViewGroup.LayoutParams lp = iv.getLayoutParams();
                                 if (lp == null) {
                                     lp = new android.view.ViewGroup.LayoutParams(itemW,
@@ -164,7 +195,6 @@ public final class MenuEditHelper {
                             int pos = (Integer) p.args[1];
                             Object holder = p.args[0];
                             int icons = sIconCount;
-                            int pad = sPadCount;
 
                             // The "+" cell sits immediately after the last icon.
                             if (pos == icons) {
@@ -197,14 +227,14 @@ public final class MenuEditHelper {
                                     });
                                 }
                                 MainModule.logMsg("[SBPlus] add cell rendered at pos " + pos
-                                        + " (icons=" + icons + " pad=" + pad + ")");
+                                        + " (icons=" + icons + ")");
                                 return;
                             }
 
                             // Blank filler cells AFTER the "+" (pad the tail to a full page).
                             if (icons >= 0 && pos > icons) {
                                 MainModule.logMsg("[SBPlus] blank filler at pos " + pos
-                                        + " (icons=" + icons + " pad=" + pad + ")");
+                                        + " (icons=" + icons + ")");
                                 android.widget.ImageView icon =
                                         (android.widget.ImageView) MainHook.getObjectField(holder, "mIcon");
                                 android.widget.TextView text =

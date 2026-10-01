@@ -127,8 +127,13 @@ public final class MenuAddButtonHelper {
             int[] loc = new int[2];
             if (anchor != null) {
                 anchor.getLocationInWindow(loc);
-                pop.showAtLocation(anchor, Gravity.TOP | Gravity.LEFT,
-                        loc[0], loc[1] - panelHeight);
+                // 2026-10-04 修复:菜单靠上时 loc[1] - panelHeight 会为负 → 面板被顶出屏幕
+                // (标题栏与顶部若干行不可见,用户以为面板坏了)。clamp 到屏幕内。
+                int screenH = ctx.getResources().getDisplayMetrics().heightPixels;
+                int y = loc[1] - panelHeight;
+                if (y < 0) y = 0;                       // 上边界
+                if (y + panelHeight > screenH) y = Math.max(0, screenH - panelHeight);  // 下边界
+                pop.showAtLocation(anchor, Gravity.TOP | Gravity.LEFT, loc[0], y);
                 MainModule.logMsg("[SBPlus] add popup above menu yRel=" + (loc[1] - panelHeight)
                         + " menuTopRel=" + loc[1] + " panelH=" + panelHeight);
             } else {

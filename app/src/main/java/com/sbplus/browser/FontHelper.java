@@ -201,6 +201,14 @@ public final class FontHelper {
             boolean ok = f.exists() && f.delete();
             if (ok && name.equals(selectedName(ctx))) selectFont(ctx, "");
             if (ok) invalidateCache();
+            // 2026-10-04 修复:同步清理显示名映射。
+            // mapSaveDisplay 会为每个导入的字体写一条 "font_display_<stored>" ->
+            // 原文件名的映射,但原 deleteFont 只删文件、不清映射 —— 反复导入/删除后
+            // prefs 里会持续累积孤儿键(每个字体一条),且若同名文件再次导入,会读到
+            // 上一次的旧显示名。删除时一并清掉即可。
+            if (ok) {
+                try { sp(ctx).edit().remove("font_display_" + name).apply(); } catch (Throwable ignored) {}
+            }
             return ok;
         } catch (Throwable ignored) { return false; }
     }
