@@ -1,98 +1,254 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  SBPlus 主界面（2026-10-04 界面重构）。
+
+  重构前：一排裸链接 + 两个同款按钮，层级扁平、无主次、颜色硬编码。
+  重构后：三张卡片（状态 / 操作 / 帮助）+ 主次分明的按钮 + 统一配色。
+
+  设计要点：
+  · 间距走 4/8dp 步长；卡片内边距 16dp、卡片间距 12dp。
+  · 颜色一律引用 @color/*，不写死 —— 否则 values-night 无法适配。
+  · 按钮背景自绘（bg_btn_primary / bg_btn_secondary），形成明确主次。
+  · 用 TextView 而非 Button 承载"链接"条目：原生 Button 自带最小高度与
+    大写转换，做成链接样式要覆盖一堆属性，TextView + 点击背景更干净。
+
+  控件 id 全部保持不变（tv_version / tv_project / tv_feedback_github /
+  tv_feedback_email / btn_open_settings / btn_open_logs），
+  MainActivity 的业务逻辑因此一行都不用改。
+-->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F5F5">
+    android:background="@color/page_bg"
+    android:fillViewport="true"
+    android:scrollbars="none">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="20dp">
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="24dp"
+        android:paddingBottom="32dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="SBPlus"
-            android:textSize="24sp"
-            android:textStyle="bold"
-            android:textColor="#1B1B1B" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="三星浏览器增强模块（LSPosed）"
-            android:textSize="13sp"
-            android:textColor="#666666" />
-
-        <TextView
-            android:id="@+id/tv_version"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:padding="6dp"
-            android:text="版本 1.0"
-            android:textSize="13sp"
-            android:textColor="#1565C0"
-            android:background="?android:attr/selectableItemBackground" />
-
-        <TextView
-            android:id="@+id/tv_project"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:padding="6dp"
-            android:text="项目地址（GitHub）"
-            android:textSize="13sp"
-            android:textColor="#1565C0"
-            android:background="?android:attr/selectableItemBackground" />
-
-        <TextView
-            android:id="@+id/tv_feedback_github"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:padding="6dp"
-            android:text="问题反馈（GitHub）"
-            android:textSize="13sp"
-            android:textColor="#1565C0"
-            android:background="?android:attr/selectableItemBackground" />
-
-        <TextView
-            android:id="@+id/tv_feedback_email"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:padding="6dp"
-            android:text="问题反馈（邮件）"
-            android:textSize="13sp"
-            android:textColor="#1565C0"
-            android:background="?android:attr/selectableItemBackground" />
-
-        <Button
-            android:id="@+id/btn_open_settings"
+        <!-- ========== 头部：应用名 + 一句话定位 ========== -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="打开 SBPlus 设置" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingBottom="20dp">
 
-        <Button
-            android:id="@+id/btn_open_logs"
+            <ImageView
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:src="@mipmap/ic_launcher"
+                android:contentDescription="@string/app_name" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/app_name"
+                    android:textColor="@color/text_primary"
+                    android:textSize="22sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.02" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="三星浏览器增强模块 · LSPosed"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ========== 卡片 1：版本状态 ========== -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="当前版本"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:id="@+id/tv_version"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:padding="10dp"
+                android:background="@drawable/bg_row_clickable"
+                android:text="版本 1.0"
+                android:textColor="@color/tv_clickable"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:drawablePadding="8dp"
+                android:gravity="center_vertical" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="点击版本号可检测更新"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- ========== 卡片 2：主要操作 ========== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
             android:layout_marginTop="12dp"
-            android:text="日志管理" />
+            android:background="@drawable/bg_card"
+            android:padding="16dp">
 
-        <TextView
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="操作"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:letterSpacing="0.08"
+                android:paddingBottom="12dp" />
+
+            <!-- 主操作：实心主色 -->
+            <Button
+                android:id="@+id/btn_open_settings"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:text="打开 SBPlus 设置"
+                android:textAllCaps="false"
+                android:textColor="@color/text_on_brand"
+                android:textSize="14sp"
+                android:background="@drawable/bg_btn_primary"
+                android:stateListAnimator="@null" />
+
+            <!-- 次操作：描边样式 -->
+            <Button
+                android:id="@+id/btn_open_logs"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
+                android:text="日志管理"
+                android:textAllCaps="false"
+                android:textColor="@color/brand"
+                android:textSize="14sp"
+                android:background="@drawable/bg_btn_secondary"
+                android:stateListAnimator="@null" />
+        </LinearLayout>
+
+        <!-- ========== 卡片 3：项目与反馈 ========== -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:background="#FFFFFF"
-            android:padding="14dp"
-            android:textColor="#333333"
-            android:textSize="13sp"
-            android:lineSpacingExtra="3dp"
-            android:text="配置入口：\n打开三星浏览器 → 设置 → SBPlus" />
+            android:orientation="vertical"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="项目"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:letterSpacing="0.08"
+                android:paddingBottom="4dp" />
+
+            <TextView
+                android:id="@+id/tv_project"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="12dp"
+                android:background="@drawable/bg_row_clickable"
+                android:text="项目地址（GitHub）"
+                android:textColor="@color/brand"
+                android:textSize="14sp"
+                android:gravity="center_vertical" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="4dp"
+                android:background="@color/divider" />
+
+            <TextView
+                android:id="@+id/tv_feedback_github"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="12dp"
+                android:background="@drawable/bg_row_clickable"
+                android:text="问题反馈（GitHub Issues）"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:gravity="center_vertical" />
+
+            <TextView
+                android:id="@+id/tv_feedback_email"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="12dp"
+                android:background="@drawable/bg_row_clickable"
+                android:text="问题反馈（邮件）"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:gravity="center_vertical" />
+        </LinearLayout>
+
+        <!-- ========== 提示卡：配置入口 ========== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="配置入口"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="打开三星浏览器 → 设置 → SBPlus"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:lineSpacingExtra="4dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="提示：本模块需在 LSPosed 中启用，并将作用域设为三星浏览器。"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
     </LinearLayout>
 </ScrollView>

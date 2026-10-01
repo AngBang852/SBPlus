@@ -26,7 +26,8 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:description="@string/module_desc"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SBPlus">
 
         <!-- Launcher entry / settings screen -->
         <activity

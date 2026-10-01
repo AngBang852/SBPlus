@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SBPlus 配色板（2026-10-04 界面重构）。
+
+  设计约束（重构时确立，后续请沿用）：
+  · 主色沿用 #1565C0 —— 与模块图标同一色系，避免"图标蓝、界面绿"的割裂。
+  · 明度即层级：正文最深、次要灰、提示更浅。不要用颜色区分"重要性"以外的语义。
+  · 全界面颜色只从本文件取，不再在布局里写死 #RRGGBB —— 否则深色模式无法统一适配。
+
+  深色模式：values-night/colors.xml 提供同名覆盖，系统切换深色时自动生效。
+  因此**新增颜色必须同时在两个文件里加**，否则深色下会回落到浅色值。
+-->
+<resources>
+
+    <!-- ===== 主色阶（品牌蓝）===== -->
+    <color name="brand">#1565C0</color>
+    <color name="brand_dark">#0D47A1</color>
+    <color name="brand_light">#E3F2FD</color>
+    <color name="brand_pressed">#0B4A96</color>
+
+    <!-- ===== 页面底色与卡片 ===== -->
+    <!-- 页面底比卡片略深，卡片才能"浮"起来（明度即层级） -->
+    <color name="page_bg">#F2F4F7</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="card_stroke">#E4E8EE</color>
+
+    <!-- ===== 文本层级 ===== -->
+    <color name="text_primary">#1A1D21</color>
+    <color name="text_secondary">#5A6472</color>
+    <color name="text_tertiary">#8A94A3</color>
+    <color name="text_on_brand">#FFFFFF</color>
+
+    <!-- ===== 状态色 ===== -->
+    <color name="success">#2E7D32</color>
+    <color name="warning">#E65100</color>
+    <color name="divider">#EDF0F4</color>
+
+    <!-- ===== 次要按钮（描边样式）===== -->
+    <color name="outline_stroke">#C7D0DB</color>
+    <color name="outline_bg">#00000000</color>
+
+    <!-- ===== 日志正文等代码块 ===== -->
+    <color name="code_bg">#F7F9FB</color>
+    <color name="code_text">#2B3440</color>
+
+</resources>

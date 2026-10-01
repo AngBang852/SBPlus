@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SBPlus 配色板 · 深色模式（2026-10-04 界面重构）。
+
+  规则：这里必须与 values/colors.xml **同名同数量**。
+  少一个名字，深色模式下该项就会回落到浅色值（表现为"深色界面里突然一块白"）。
+
+  深色下的明度关系与浅色相反：页面底比卡片更深（不是更浅），卡片才"浮"起来。
+  主色也相应提亮，否则 #1565C0 在深底上对比度不足。
+-->
+<resources>
+
+    <!-- ===== 主色阶（深底上提亮，保证对比度 ≥ 4.5:1）===== -->
+    <color name="brand">#4A9EFF</color>
+    <color name="brand_dark">#1E6FD9</color>
+    <color name="brand_light">#16283D</color>
+    <color name="brand_pressed">#6FB2FF</color>
+
+    <!-- ===== 页面底色与卡片（深底时页面比卡片更深）=====
+         2026-10-04 装机调整：初版 page_bg=#0F1114 / card_bg=#1A1D21 的差值在真机
+         OLED 上几乎看不出卡片边界（截图实测卡片与底色都判为黑）。深色模式下
+         "卡片浮起"必须靠**明显更大的明度差**，这里把卡片提到 #23272E 并加强描边。 -->
+    <color name="page_bg">#0B0D10</color>
+    <color name="card_bg">#23272E</color>
+    <color name="card_stroke">#343A43</color>
+
+    <!-- ===== 文本层级 ===== -->
+    <color name="text_primary">#ECF0F4</color>
+    <color name="text_secondary">#A8B2BF</color>
+    <color name="text_tertiary">#7A8494</color>
+    <color name="text_on_brand">#0F1114</color>
+
+    <!-- ===== 状态色 ===== -->
+    <color name="success">#66BB6A</color>
+    <color name="warning">#FFB74D</color>
+    <color name="divider">#252A31</color>
+
+    <!-- ===== 次要按钮（描边样式）===== -->
+    <color name="outline_stroke">#3A4149</color>
+    <color name="outline_bg">#00000000</color>
+
+    <!-- ===== 日志正文等代码块 =====
+         深色下"输入框/代码块"要比卡片**更深**（凹陷感），而不是更浅。
+         初版 code_bg=#14171B 与新版 card_bg=#23272E 已形成正确层次，保留。 -->
+    <color name="code_bg">#171A1F</color>
+    <color name="code_text">#C8D1DB</color>
+
+</resources>

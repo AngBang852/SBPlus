@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SBPlus 主题 · 深色模式（2026-10-04 界面重构）。
+
+  与 values/themes.xml 的差别只有两点：
+  ① 继承 Dark 变体（控件默认前景色才会跟着变白）；
+  ② windowLightStatusBar 关掉 —— 深色底上必须用浅色状态栏图标，否则看不见。
+-->
+<resources>
+
+    <style name="Theme.SBPlus" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">@color/page_bg</item>
+        <item name="android:navigationBarColor">@color/page_bg</item>
+        <item name="android:windowBackground">@color/page_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+</resources>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  可点击条目背景：按下时给一层极淡的主色，替代 ?attr/selectableItemBackground。
+  用 selectableItemBackground 在深色模式下会取到系统主题的涟漪色，与本模块配色
+  不一致；自绘更可控。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      禁用态：检测更新期间 MainActivity 会 setEnabled(false)，
+      此时需要视觉反馈（否则用户反复点、以为是卡住了）。
+      用半透明而非改色 —— 半透明对浅色/深色底都成立。
+    -->
+    <item android:state_enabled="false">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/outline_bg" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/brand_light" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/outline_bg" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+</selector>

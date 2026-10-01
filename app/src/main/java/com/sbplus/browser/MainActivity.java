@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
         Button openSettingsBtn = findViewById(R.id.btn_open_settings);
         Button openLogsBtn = findViewById(R.id.btn_open_logs);
 
-        mVersionView.setText("版本 " + BuildConfig.VERSION_NAME + "（点击检测更新）");
+        mVersionView.setText("版本 " + BuildConfig.VERSION_NAME);
 
         // 项目地址：点击用浏览器打开 GitHub 仓库
         projectView.setOnClickListener(v -> {
