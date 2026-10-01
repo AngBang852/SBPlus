@@ -1,3 +1,12 @@
 minApiVersion=102
 targetApiVersion=102
 staticScope=true
+# 2026-10-04 说明：**有意不设置 autoHotReload**。
+#
+# autoHotReload=true 会让"安装新版 APK"自动触发热重载。本模块实现了热重载
+# （见 MainModule.onHotReloading / onHotReloaded），但**尚未完整验证**：
+#   · 触发路径未实测（需经 XposedService.hotReloadModule()，界面暂无入口）；
+#   · 热重载后的状态恢复（Application Context / 已撤销功能列表）只在代码层实现，
+#     未经真机验证。
+# 在验证完成前保持关闭，避免"装个新版就悄悄换掉运行中的代码"这种难以排查的行为。
+# 验证通过后可在此加一行 autoHotReload=true 启用。

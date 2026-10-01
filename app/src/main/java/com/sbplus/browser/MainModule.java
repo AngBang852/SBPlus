@@ -12,10 +12,25 @@ import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam;
 /**
  * SBPlus 的 Xposed 模块入口。
  *
- * <p><b>热重载支持（2026-10-04 新增）</b>
+ * <p><b>⚠️ 热重载功能状态：已实现但**未完整验证**（2026-10-04）</b>
  *
- * <p>热重载让"改完模块代码"无需重启目标应用即可生效。对本项目的实际价值很直接：
- * 开发期每次改动都要强停三星浏览器再启动，反复几十次后这部分时间相当可观。
+ * <p>请不要因为看到下面两个回调就认为热重载"可用"。当前事实：
+ * <ul>
+ *   <li><b>触发路径未实测</b> —— 热重载需经 {@code XposedService.hotReloadModule()}
+ *       触发，而模块界面<b>没有提供入口</b>。也就是说现在没有任何按钮能触发它。</li>
+ *   <li><b>状态恢复未经真机验证</b> —— 热重载后新一代的静态字段全为初始值
+ *       （{@code sAppContext} 为 null、{@code HookRegistry} 已撤销集合为空），
+ *       已实现 {@link MainHook#restoreProcessStateAfterReload()} 去恢复，
+ *       但该路径从未在真机上跑通过。</li>
+ *   <li><b>{@code autoHotReload} 有意未开启</b>（见 module.prop），
+ *       所以"安装新 APK 自动重载"这条路径也不通。</li>
+ * </ul>
+ *
+ * <p><b>它的价值本身也有限</b>：热重载只省"开发迭代时间"（改代码后不必强停浏览器），
+ * 对最终用户没有任何可感功能。本项目日常验证的都是"启动即生效"的东西，
+ * 重启浏览器本来就不痛，因此实际收益低于预期。
+ *
+ * <p><b>以下为实现要点（供将来验证/补完时参考）</b>
  *
  * <p>实现依据 libxposed 官方文档（{@code XposedModuleInterface} 的 javadoc），
  * 有两个**必须遵守的约束**，否则会出问题：
@@ -114,6 +129,12 @@ public class MainModule extends XposedModule {
             // getClassLoader() 来自 HotReloadedParam（它继承 ModuleLoadedParam 的进程信息，
             // 另提供 getClassLoader —— 与 PackageReadyParam 同名但语义是"当前代的加载器"）。
             MainHook.doHooks(param.getProcessName(), MainHook.moduleClassLoaderForReload());
+            // **关键**：恢复进程级状态。新一代的静态字段全是初始值 ——
+            // sAppContext 为 null（而官方明确生命周期回调不会重放，即
+            // SBrowserApplication.onCreate 不会再触发，靠那个 hook 永远拿不到 Context），
+            // HookRegistry 的已撤销集合为空（用户关掉的功能会全部复活）。
+            // 本文件 250 处依赖 sAppContext，不恢复等于热重载后模块大部分功能失效。
+            MainHook.restoreProcessStateAfterReload();
             logSelf(Log.INFO, "[SBPlus] hot reload: hooks re-installed");
         } catch (Throwable t) {
             logSelf(Log.ERROR, "[SBPlus] hot reload re-install failed", t);

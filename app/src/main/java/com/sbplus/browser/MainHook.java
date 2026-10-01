@@ -399,6 +399,75 @@ public class MainHook {
     // Global application Context (captured from SBrowserApplication.onCreate).
     private static volatile Context sAppContext;
 
+    /**
+     * 通过反射从 ActivityThread 取当前 Application（热重载恢复用，2026-10-04 新增）。
+     *
+     * <p><b>为什么需要它</b>：热重载会换掉模块 classloader，新一代的静态字段
+     * {@link #sAppContext} 重新变回 null。而 libxposed 官方明确"生命周期回调不会重放"
+     * —— 即 {@code SBrowserApplication.onCreate} 不会再触发，靠那个 hook 永远拿不到 Context。
+     * 实测本文件有 **250 处**依赖 {@code sAppContext}，为 null 意味着下载调度、
+     * 用户脚本、主题、字体等绝大部分功能失效。故必须有一条不依赖生命周期回调的获取路径。
+     *
+     * <p><b>实现</b>：{@code ActivityThread.currentApplication()} 是 Android 框架自身
+     * 维护的进程级 Application 引用，与模块 classloader 无关（它由宿主进程创建）。
+     * 反射调用它即可在任何时刻拿到 Context —— 不需要等任何回调。
+     *
+     * <p>用反射而非直接调用：{@code ActivityThread} 是隐藏 API，编译期不可见
+     * （且 Android 9+ 对隐藏 API 有灰名单限制；本方法属框架自身常用入口，风险低，
+     * 失败时安静返回 null，由调用方决定降级行为）。
+     *
+     * @return 当前进程的 Application；取不到返回 null
+     */
+    static Context currentAppContext() {
+        Context c = sAppContext;
+        if (c != null) return c;
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            java.lang.reflect.Method m = at.getDeclaredMethod("currentApplication");
+            m.setAccessible(true);
+            Object app = m.invoke(null);
+            if (app instanceof Context) {
+                // 拿到就顺手缓存 —— 后续调用免去反射开销。
+                sAppContext = (Context) app;
+                MainModule.logMsg("[SBPlus] sAppContext recovered via ActivityThread");
+                return sAppContext;
+            }
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] currentAppContext failed: " + t);
+        }
+        return null;
+    }
+
+    /**
+     * 热重载后恢复进程级状态（2026-10-04 新增）。
+     *
+     * <p>由 {@code MainModule.onHotReloaded} 在新代码里调用。必须恢复的东西：
+     * <ul>
+     *   <li>{@code sAppContext} —— 见 {@link #currentAppContext} 的说明；</li>
+     *   <li>用户脚本的"已撤销功能"列表 —— 新一代的 HookRegistry 是空集合，
+     *       需从 prefs 重新载入，否则用户关掉的功能会全部复活；</li>
+     *   <li>LogWriter 的 Context —— 否则跨进程日志链路断开。</li>
+     * </ul>
+     */
+    static void restoreProcessStateAfterReload() {
+        try {
+            Context ctx = currentAppContext();
+            if (ctx == null) {
+                MainModule.logMsg("[SBPlus] reload: cannot recover Application,"
+                        + " features depending on Context will be degraded until next launch");
+                return;
+            }
+            LogWriter.init(ctx);
+            LogWriter.log("core", "hot reload: Application Context recovered");
+            HookRegistry.loadRevoked(ctx);
+            applyRevokedFeatures();
+            try { registerDownloadListReceiver(ctx); } catch (Throwable ignored) {}
+            MainModule.logMsg("[SBPlus] reload: process state restored");
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] restoreProcessStateAfterReload error: " + t);
+        }
+    }
+
     private static volatile android.app.Activity sCurrentActivity;
 
     private static final String SBROWSER_PACKAGE = "com.sec.android.app.sbrowser";
@@ -2685,6 +2754,19 @@ private static final String[] RANDOM_UAS = new String[]{
                             // 才能让"用户上次关掉的功能"在本次启动中真正保持关闭。
                             HookRegistry.loadRevoked(sAppContext);
                             applyRevokedFeatures();
+                            // 2026-10-04：自检 —— 验证 currentAppContext() 的反射路径可用。
+                            // 热重载后新一代拿不到 Context（生命周期回调不重放），
+                            // 唯一出路就是这条反射路径；若它在真机上不可用，
+                            // 热重载后的状态恢复就是空谈。这里在正常启动时先探一次，
+                            // 日志里出现 "probe: ActivityThread path OK" 即证明该路径可用。
+                            try {
+                                Context probe = currentAppContext();
+                                MainModule.logMsg("[SBPlus] probe: ActivityThread path "
+                                        + (probe != null ? "OK (" + probe.getClass().getName() + ")"
+                                                         : "UNAVAILABLE"));
+                            } catch (Throwable t) {
+                                MainModule.logMsg("[SBPlus] probe: ActivityThread path THREW " + t);
+                            }
                             try {
                                 registerDownloadListReceiver(sAppContext);
                             } catch (Throwable ignore) {}
