@@ -1345,6 +1345,31 @@ private static final String[] RANDOM_UAS = new String[]{
         return HookRegistry.countOf(name);
     }
 
+    /**
+     * 把"用户已关闭的功能"落到实处（2026-10-04 新增）。
+     *
+     * <p>为什么需要单独一步：{@code doHooks} 在类加载期就完成了全部 hook 注册，
+     * 而"已撤销功能"列表要到 Application.onCreate 才能读到（需要 Context 才能访问 prefs）。
+     * 即 safeFeature 里那句"跳过已撤销功能"对**首次启动**根本来不及生效。
+     * 因此载入列表后必须再撤销一次已注册的那些。
+     *
+     * <p>幂等：{@code revokeFeature} 对已撤销的功能返回 0，重复调用无副作用。
+     */
+    private static void applyRevokedFeatures() {
+        try {
+            java.util.Map<String, Integer> snap = HookRegistry.snapshot();
+            for (String feature : snap.keySet()) {
+                if (HookRegistry.isRevoked(feature)) {
+                    int n = HookRegistry.revokeFeature(feature);
+                    MainModule.logMsg("[SBPlus] revoked feature '" + feature
+                            + "' on startup (user disabled it), hooks=" + n);
+                }
+            }
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] applyRevokedFeatures error: " + t);
+        }
+    }
+
     /** 某功能当前是否可用(供业务逻辑在调用前自检,避免在失效功能上继续动作)。 */
     public static boolean isFeatureAvailable(String name) {
         synchronized (sFeatureStatus) {
@@ -2650,6 +2675,16 @@ private static final String[] RANDOM_UAS = new String[]{
                             sAppContext = (Context) param.thisObject;
                             LogWriter.init(sAppContext);
                             LogWriter.log("core", "captured Application Context: " + sAppContext);
+                            // 2026-10-04：载入"已被用户运行时关闭的功能"列表，并立即撤销。
+                            //
+                            // **时序说明（重要，勿想当然）**：doHooks 在**类加载期**就把所有
+                            // safeFeature 注册完了，而本回调（SBrowserApplication.onCreate）
+                            // 晚于它执行。也就是说此刻 hook 早已挂上，safeFeature 里那句
+                            // "跳过已撤销功能"根本来不及生效。
+                            // 因此这里不能只载入 —— 必须载入后**把已注册的那些也撤掉**，
+                            // 才能让"用户上次关掉的功能"在本次启动中真正保持关闭。
+                            HookRegistry.loadRevoked(sAppContext);
+                            applyRevokedFeatures();
                             try {
                                 registerDownloadListReceiver(sAppContext);
                             } catch (Throwable ignore) {}
@@ -4758,6 +4793,10 @@ private static final String[] RANDOM_UAS = new String[]{
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save UA enabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（无需重启浏览器）。
+        // 接线放在"持久化方法"里而非各个 UI 回调里 —— 所有调用点自动获益，
+        // 也避免漏掉某处回调导致"开关关了但 hook 还挂着"。
+        FeatureToggles.onToggleChanged("ua-override", enabled);
     }
 
     /** 随机浏览器标识:每次启动随机刷新 UA。 */
@@ -5008,6 +5047,8 @@ private static final String[] RANDOM_UAS = new String[]{
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save clean settings enabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）
+        FeatureToggles.onToggleChanged("clean-settings", enabled);
     }
 
     /** 返回被勾选要屏蔽的设置项 key 集合。 */
@@ -5069,6 +5110,8 @@ private static final String[] RANDOM_UAS = new String[]{
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save block update error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）
+        FeatureToggles.onToggleChanged("block-update", enabled);
     }
 
     private static void navigateToCleanSettingsPicker(android.app.Activity act) {
@@ -5215,6 +5258,8 @@ private static final String[] RANDOM_UAS = new String[]{
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save video bg enabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）
+        FeatureToggles.onToggleChanged("video-background", enabled);
     }
 
     private static String videoBgPath() {
@@ -9112,6 +9157,8 @@ private static void showUaGroupDialog(final Context ctx) {
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save grid menu enabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）
+        FeatureToggles.onToggleChanged("more-menu-grid", enabled);
     }
 
     private static boolean isRegionLockEnabled() {
@@ -9131,6 +9178,8 @@ private static void showUaGroupDialog(final Context ctx) {
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save region lock enabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）
+        FeatureToggles.onToggleChanged("region-lock", enabled);
     }
 
     private static String regionCode() {
@@ -13669,6 +13718,8 @@ private static void showUaGroupDialog(final Context ctx) {
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] saveSniffEnabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）
+        FeatureToggles.onToggleChanged("network-sniff", enabled);
     }
 
     private static boolean isUserscriptEnabled() {
@@ -13694,6 +13745,11 @@ private static void showUaGroupDialog(final Context ctx) {
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] save userscript enabled error: " + t);
         }
+        // 2026-10-04：关闭时立即撤销已注册的 hook（见 FeatureToggles）。
+        // 油猴总开关要撤**两个**功能：脚本注入本体 + 工具栏图标 ——
+        // 后者是独立注册的 hook，只撤前者会留下一个点不动的图标。
+        FeatureToggles.onToggleChanged("userscript", enabled);
+        FeatureToggles.onToggleChanged("userscript-toolbar", enabled);
     }
 
     /** 从当前可见 Activity 的 view 树中移除地址栏油猴图标(幂等)。 */
@@ -17410,6 +17466,16 @@ private static void showUaGroupDialog(final Context ctx) {
     static String backupBookmarkDbPublic() { return backupBookmarkDb(); }
 
     static void SbExecutorsBg(Runnable r) { SbExecutors.bg(r); }
+
+    /**
+     * toastOnMain 的包内桥接（2026-10-04 新增）。
+     *
+     * <p>原方法为 private，而 {@link FeatureToggles} 需要在"功能被运行时撤销"、
+     * "打开需重启"等场景给用户提示。沿用本文件既有的桥接约定
+     * （如上面的 {@link #SbExecutorsBg}、{@code bookmarkDbPathPublic}），
+     * 不改原方法的可见性，避免影响其余调用点。
+     */
+    static void toastOnMainPublic(String msg) { toastOnMain(msg); }
 
     /** 「模型」设置项的副标题: 让主人一眼看到当前用的是哪个模型。 */
     static String aiSettingsSummary(Context ctx) {

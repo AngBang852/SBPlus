@@ -40,8 +40,66 @@ final class HookRegistry {
 
     private static final Object LOCK = new Object();
 
-    /** 已被撤销的功能名（撤销后若又有 hook 注册进来，立即撤销它，避免"撤销后又活过来"）。 */
+    /**
+     * 已被撤销的功能名。
+     *
+     * <p>2026-10-04：改为**持久化 + 内存缓存**双层。
+     * 起初只用内存集合，但那样"用户关掉功能 → 重启浏览器 → 功能又活了" ——
+     * 与用户的选择相反，是明显的缺陷。撤销状态必须跨进程重启保持。
+     *
+     * <p>持久化介质用浏览器进程自己的 prefs（与 {@code processPrefs} 同一份），
+     * 因为撤销判断发生在<b>浏览器进程</b>里（hook 注册期），必须用该进程可读的存储。
+     * 写成逗号分隔的功能名列表（功能名只含小写字母与连字符，无歧义）。
+     */
     private static final java.util.Set<String> REVOKED = new java.util.HashSet<String>();
+
+    private static final String PREFS_NAME = "sbplus_config";
+    private static final String KEY_REVOKED = "sbplus_revoked_features";
+
+    /** 持久化上下文（由 MainHook 在捕获到 Application Context 后注入）。 */
+    private static volatile android.content.Context sPrefsCtx;
+
+    /** 从 prefs 载入已撤销集合（进程启动时调一次）。 */
+    static void loadRevoked(android.content.Context ctx) {
+        if (ctx == null) return;
+        sPrefsCtx = ctx;
+        try {
+            String raw = ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                    .getString(KEY_REVOKED, "");
+            synchronized (LOCK) {
+                REVOKED.clear();
+                if (raw != null && !raw.isEmpty()) {
+                    for (String s : raw.split(",")) {
+                        if (!s.isEmpty()) REVOKED.add(s);
+                    }
+                }
+            }
+            if (!REVOKED.isEmpty()) {
+                android.util.Log.i("SBPlus", "loaded revoked features: " + REVOKED);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("SBPlus", "loadRevoked failed", t);
+        }
+    }
+
+    /** 把已撤销集合写回 prefs。 */
+    private static void persistRevoked() {
+        android.content.Context ctx = sPrefsCtx;
+        if (ctx == null) return;   // 上下文未就绪：仅内存生效，下次启动会丢（可接受降级）
+        try {
+            StringBuilder sb = new StringBuilder();
+            synchronized (LOCK) {
+                for (String s : REVOKED) {
+                    if (sb.length() > 0) sb.append(",");
+                    sb.append(s);
+                }
+            }
+            ctx.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                    .edit().putString(KEY_REVOKED, sb.toString()).apply();
+        } catch (Throwable t) {
+            android.util.Log.w("SBPlus", "persistRevoked failed", t);
+        }
+    }
 
     /**
      * 设置当前正在注册的功能名。
@@ -103,6 +161,8 @@ final class HookRegistry {
             REVOKED.add(feature);
             list = BY_FEATURE.remove(feature);
         }
+        // 持久化：否则用户重启浏览器后该功能会"又活过来"，与用户选择相反。
+        persistRevoked();
         if (list == null) return 0;
         int n = 0;
         for (XposedInterface.HookHandle h : list) {
@@ -126,6 +186,7 @@ final class HookRegistry {
             for (String f : BY_FEATURE.keySet()) REVOKED.add(f);
             BY_FEATURE.clear();
         }
+        persistRevoked();
         int n = 0;
         for (XposedInterface.HookHandle h : all) {
             try { h.unhook(); n++; } catch (Throwable ignored) {}
@@ -137,6 +198,24 @@ final class HookRegistry {
     static boolean isRevoked(String feature) {
         if (feature == null) return false;
         synchronized (LOCK) { return REVOKED.contains(feature); }
+    }
+
+    /**
+     * 清除某功能的"已撤销"标记（用户重新打开该功能时调用）。
+     *
+     * <p><b>注意：这不会让功能立即恢复。</b>libxposed 没有"重新挂上已撤销 handle"
+     * 的接口，被 unhook 的方法无法在原进程内重新 hook。因此清除标记只是让
+     * <b>下次浏览器启动</b>时该功能能被正常注册。调用方必须把这一点告知用户
+     * （界面提示"需要重启浏览器生效"）。
+     *
+     * @return true = 确实清除了标记（此前处于已撤销状态）
+     */
+    static boolean clearRevoked(String feature) {
+        if (feature == null) return false;
+        boolean removed;
+        synchronized (LOCK) { removed = REVOKED.remove(feature); }
+        if (removed) persistRevoked();
+        return removed;
     }
 
     /** 某功能当前登记的 hook 数量（诊断用）。 */
