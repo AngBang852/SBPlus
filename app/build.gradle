@@ -39,8 +39,8 @@ android {
         // 隔离，因此提高 minSdk 并不会减少需要维护的兼容代码 —— 没有额外收益。
         minSdk 26
         targetSdk 34
-        versionCode 11
-        versionName "2.6.0"
+        versionCode 12
+        versionName "2.6.1"
 
         // 把版本号注入到普通类也能读到的位置。
         // 背景:MainHook 运行在**三星浏览器进程**里,加载不到模块自己的 BuildConfig,
