@@ -888,7 +888,9 @@ private static final String[] RANDOM_UAS = new String[]{
                 }
                 invokeHookAfter(callback, param);
                 if (param.hasThrowable()) throw param.getThrowable();
-                return result;
+                // 2026-10-11 修复(审查 P6):与 findAndHookMethod 一致,返回 param 而不是
+                // 快照 —— 否则 afterHookedMethod 里 setResult 的修改会被静默丢弃。
+                return param.getResult();
             });
         } catch (Throwable t) { throw new RuntimeException(t); }
     }
@@ -1009,7 +1011,7 @@ private static final String[] RANDOM_UAS = new String[]{
             }
             invokeHookAfter(callback, param);
             if (param.hasThrowable()) throw param.getThrowable();
-            return result;
+            return param.getResult();   // P6:同 findAndHookMethod,尊重 afterHook 的 setResult
         });
     }
 
@@ -1358,7 +1360,7 @@ private static final String[] RANDOM_UAS = new String[]{
                 }
                 invokeHookAfter(callback, param);
                 if (param.hasThrowable()) throw param.getThrowable();
-                return result;
+                return param.getResult();   // P6:同 findAndHookMethod
             });
         } catch (Throwable t) {
             throw new RuntimeException(t);
@@ -1894,11 +1896,16 @@ private static final String[] RANDOM_UAS = new String[]{
      */
     private static Class<?> resolveDebugFragmentBase(ClassLoader cl) {
         // 多个候选锚点:任一存在即可,降低单个类被删改后彻底失效的风险。
+        // 2026-10-13 修正：原先后三个候选各少了 "Preference" 三个字，这三个类名在
+        // 30.0.0.67 与 31.0.0.64 的 dex 里**都不存在**（已用 _tools\idx_v30/v31.json
+        // 索引 + 直接扫 APK 内 6 个 dex 双重确认），每次启动都白抛三次 ClassNotFound。
+        // 改用真名，让这条回退链真正有意义 —— 万一 DebugSettingsFragment 被删，
+        // 还能落到这几个兄弟页上。
         Class<?> anchor = findClassAny(cl,
                 "com.sec.android.app.sbrowser.settings.debug.DebugSettingsFragment",
-                "com.sec.android.app.sbrowser.settings.debug.EtcDebugSettingsFragment",
-                "com.sec.android.app.sbrowser.settings.debug.TabSettingsFragment",
-                "com.sec.android.app.sbrowser.settings.debug.MultiTabSettingsFragment");
+                "com.sec.android.app.sbrowser.settings.debug.EtcDebugPreferenceFragment",
+                "com.sec.android.app.sbrowser.settings.debug.TabDebugPreferenceFragment",
+                "com.sec.android.app.sbrowser.settings.debug.MultiTabDebugPreferenceFragment");
         if (anchor == null) return null;
         Class<?> best = null;
         for (Class<?> c = anchor.getSuperclass(); c != null; c = c.getSuperclass()) {
@@ -4240,13 +4247,13 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                         "This deletes every cookie in the browser (all logins are lost). It cannot be undone."))
                 .setPositiveButton(T("全部清空", "Clear all"), new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface d2, int w2) {
-                        new Thread(new Runnable() {
+                        SbExecutors.bg(new Runnable() {
                             @Override public void run() {
                                 final int n = CookieHelper.clearAll(act);
                                 toastOnMain(T("已清空 ", "Cleared ") + n + T(" 条 Cookie", " cookies"));
                                 MainModule.logMsg("[SBPlus] clearAll cookies n=" + n);
                             }
-                        }).start();
+                        });
                     }
                 })
                 .setNegativeButton(T("取消", "Cancel"), null)
@@ -4308,7 +4315,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
     }
 
     private static void exportAllCookies(final android.app.Activity act) {        // 读库可能较慢, 移出主线程
-        new Thread(new Runnable() {
+        SbExecutors.bg(new Runnable() {
             @Override public void run() {
                 final String text = CookieHelper.exportNetscape(act);
                 final int lines = Math.max(0, countLines(text) - 3);
@@ -4348,7 +4355,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                           + T("（请用后删除）", " (delete it after use)"));
                 MainModule.logMsg("[SBPlus] cookies exported: " + p + " n=" + n + " err=" + e);
             }
-        }).start();
+        });
     }
 
     private static int countLines(String s) {
@@ -4374,7 +4381,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
 
     /** 读取选中的 cookie 文件并导入。由 onActivityResult(REQUEST_COOKIE_PICK) 调用。 */
     private static void doImportCookies(final android.app.Activity act, final android.net.Uri uri) {
-        new Thread(new Runnable() {
+        SbExecutors.bg(new Runnable() {
             @Override public void run() {
                 int n = 0;
                 try {
@@ -4399,7 +4406,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                         : T("没有可导入的 Cookie（需 Netscape 格式）", "Nothing imported (Netscape format required)"));
                 MainModule.logMsg("[SBPlus] cookies imported n=" + cnt);
             }
-        }).start();
+        });
     }
 
     private static String hostKeyOf(String host) { return host.startsWith(".") ? host : "." + host; }
@@ -4531,7 +4538,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                             }
                             // 差量保存: 未改动的条目整条不动, 保住 expires 等元数据
                             final java.util.List<String[]> want = desired;
-                            new Thread(new Runnable() {
+                            SbExecutors.bg(new Runnable() {
                                 @Override public void run() {
                                     final int n = CookieHelper.applyDiff(act, host, want);
                                     toastOnMain(n < 0
@@ -4540,7 +4547,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                                                 "Saved " + n + " change(s). Refresh to apply"));
                                     MainModule.logMsg("[SBPlus] cookie saved n=" + n + " host=" + host);
                                 }
-                            }).start();
+                            });
                             dlg.dismiss();
                         }
                     });
@@ -4700,6 +4707,55 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
         return ctx.getSharedPreferences("sbplus_config", android.content.Context.MODE_PRIVATE);
     }
 
+    /**
+     * 布尔功能开关的统一读取入口（2026-10-09 新增，代码审核 M3 修复）。
+     *
+     * <p><b>解决的问题</b>：全库原有 15 个 {@code isXxxEnabled()} 各自复制了同一段
+     * 「{@code try { if (sAppContext != null) return prefs.getBoolean(...); } catch {} return 默认值;}」，
+     * 其中 catch 是**空体** —— 于是「上下文未就绪 / 读失败」与「用户确实关掉了这个开关」
+     * 在返回值上完全一致，且没有任何日志。
+     *
+     * <p>这正落在 {@code _AUDIT.md} 约定的「**改变了功能判定结果的**」那一类：必须记日志。
+     * 历史真机现象与之吻合 ——「更新后第一次打开浏览器功能不生效，第二次打开就正常」，
+     * 就是首次判定时上下文尚未捕获、被静默当成"用户关着"。
+     *
+     * <p><b>失败方向</b>：读不到时返回调用方传入的 {@code def}（保守）。多数开关默认 {@code false}
+     * （宁可不启用也不误启用）；少数默认开启的（如下载桥 {@code true}）由调用方指定。
+     *
+     * <p><b>为什么只记一次</b>：这些函数位于 hook 回调的**热路径**上（每次绘制、每次页面加载
+     * 都会被调用）。若每次失败都打日志会淹没真正需要关注的错误 —— 与 {@code _AUDIT.md} 中
+     * 「hook 调用失败保持安静」是同一个取舍。故只在**首次**读不到时记一条。
+     *
+     * @param key prefs 键
+     * @param def 读不到时的返回值（调用方需保证这是保守方向）
+     */
+    private static volatile boolean sPrefReadWarned = false;
+
+    /**
+     * 首次「读不到配置」时记一条日志（2026-10-09 新增）。
+     *
+     * <p>与 {@link #readBoolPref} 共用同一个"只提示一次"标志：这些调用点都在 hook 回调的
+     * 热路径上，重复打日志会淹没真正需要关注的错误。适用于**无法**直接套用
+     * {@code readBoolPref} 的判定函数（例如 {@code isThemeActive} 还要综合多个来源）。
+     */
+    static void warnPrefOnce(String what, String detail) {
+        if (sPrefReadWarned) return;
+        sPrefReadWarned = true;
+        MainModule.logMsg("[SBPlus] pref unavailable: " + what + " (" + detail
+                + ") -> 使用保守默认值（后续同类提示不再重复）");
+    }
+
+    public static boolean readBoolPref(String key, boolean def) {
+        try {
+            android.content.Context c = sAppContext;
+            if (c != null) return processPrefs(c).getBoolean(key, def);
+            warnPrefOnce("pref:" + key, "sAppContext null");
+        } catch (Throwable t) {
+            warnPrefOnce("pref:" + key, String.valueOf(t));
+        }
+        return def;
+    }
+
     // ================= GM 存储管理 =================
     private static final String GM_SP_NAME = "sbplus_gm_storage";
 
@@ -4712,8 +4768,50 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
         return "gm_" + tag + "_" + key;
     }
 
+    /** GM 存储合法 tag 的缓存(见 isGmTagKnown)。 */
+    private static volatile java.util.Set<String> sGmKnownTags = null;
+    private static volatile long sGmKnownTagsAt = 0L;
+    private static volatile boolean sGmTagRejectWarned = false;
+
+    /**
+     * 2026-10-11 修复(审查 P2):GM 存储的 tag 由**页面 JS** 提供(桥注入在主世界),
+     * 任意网页都能借别人的脚本身份读写任意脚本的 GM 数据(原实现完全不校验身份)。
+     * 这里要求 tag 必须是「当前已安装脚本的 @name」或 {@code _global_},其余拒绝。
+     *
+     * <p>残余风险:主世界注入无法区分脚本调用与页面调用,页面伪冒「已安装脚本名」仍然
+     * 可能(与 GM_xhr / GM.cookie 同一接受度,见 SbplusJsBridge 类注释)。本门槛的价值
+     * 是把「零成本的任意 tag 读写」收窄为「必须先知道一个真实脚本名」。允许集合按 30 秒
+     * 缓存;读取失败按空集处理(保守拒绝)。
+     */
+    private static boolean isGmTagKnown(String tag) {
+        if (tag == null || tag.isEmpty()) return false;
+        if ("_global_".equals(tag)) return true;
+        long now = System.currentTimeMillis();
+        java.util.Set<String> known = sGmKnownTags;
+        if (known == null || (now - sGmKnownTagsAt) > 30000L) {
+            java.util.Set<String> ns = new java.util.HashSet<String>();
+            try {
+                for (UserscriptMeta m : loadUserscripts()) {
+                    if (m != null && m.name != null && !m.name.isEmpty()) ns.add(m.name);
+                }
+            } catch (Throwable ignored) {}
+            known = ns;
+            sGmKnownTags = ns;
+            sGmKnownTagsAt = now;
+        }
+        return known.contains(tag);
+    }
+
+    /** 拒绝未知 tag 时只记一次日志(页面可能高频调用,避免刷日志)。 */
+    private static void warnGmTagRejected(String op, String tag) {
+        if (sGmTagRejectWarned) return;
+        sGmTagRejectWarned = true;
+        MainModule.logMsg("[SBPlus] GM storage " + op + " rejected: unknown tag=" + tag);
+    }
+
     public static void gmSetValue(String tag, String key, String value) {
         try {
+            if (!isGmTagKnown(tag)) { warnGmTagRejected("set", tag); return; }
             android.content.SharedPreferences sp = gmStoragePrefs();
             if (sp == null) return;
             sp.edit().putString(gmStorageKey(tag, key), value == null ? "" : value).commit();
@@ -4722,6 +4820,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
 
     public static String gmGetValue(String tag, String key) {
         try {
+            if (!isGmTagKnown(tag)) { warnGmTagRejected("get", tag); return null; }
             android.content.SharedPreferences sp = gmStoragePrefs();
             if (sp == null) return null;
             return sp.getString(gmStorageKey(tag, key), null);
@@ -4730,6 +4829,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
 
     public static void gmDeleteValue(String tag, String key) {
         try {
+            if (!isGmTagKnown(tag)) { warnGmTagRejected("delete", tag); return; }
             android.content.SharedPreferences sp = gmStoragePrefs();
             if (sp == null) return;
             sp.edit().remove(gmStorageKey(tag, key)).commit();
@@ -4738,6 +4838,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
 
     public static String gmListValues(String tag) {
         try {
+            if (!isGmTagKnown(tag)) { warnGmTagRejected("list", tag); return "[]"; }
             android.content.SharedPreferences sp = gmStoragePrefs();
             if (sp == null) return "[]";
             String prefix = "gm_" + tag + "_";
@@ -5126,14 +5227,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
         }
     }
 
-    private static boolean isUaEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_UA, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isUaEnabled() { return readBoolPref(KEY_ENABLE_UA, false); }
 
     private static void saveUaEnabled(boolean enabled) {
         try {
@@ -5150,14 +5244,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
     }
 
     /** 随机浏览器标识:每次启动随机刷新 UA。 */
-    private static boolean isRandomUaEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_RANDOM_UA, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isRandomUaEnabled() { return readBoolPref(KEY_ENABLE_RANDOM_UA, false); }
 
     private static void saveRandomUaEnabled(boolean enabled) {
         try {
@@ -5380,14 +5467,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
 
     // ---- 精简设置页(屏蔽设置项) ----
 
-    private static boolean isCleanSettingsEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_CLEAN_SETTINGS, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isCleanSettingsEnabled() { return readBoolPref(KEY_ENABLE_CLEAN_SETTINGS, false); }
 
     private static void saveCleanSettingsEnabled(boolean enabled) {
         try {
@@ -5443,14 +5523,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
         return hiddenSettings().contains(key);
     }
 
-    private static boolean isBlockUpdateEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_BLOCK_UPDATE, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isBlockUpdateEnabled() { return readBoolPref(KEY_ENABLE_BLOCK_UPDATE, false); }
 
     private static void saveBlockUpdateEnabled(boolean enabled) {
         try {
@@ -5591,14 +5664,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
 
     // ---- 主页视频背景 ----
 
-    private static boolean isVideoBgEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_VIDEO_BG, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isVideoBgEnabled() { return readBoolPref(KEY_ENABLE_VIDEO_BG, false); }
 
     private static void saveVideoBgEnabled(boolean enabled) {
         try {
@@ -5633,14 +5699,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
     }
 
     /** 主页美化:去除主页搜索框内文字。 */
-    private static boolean isHomeClearTextEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_HOME_CLEAR_TEXT, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isHomeClearTextEnabled() { return readBoolPref(KEY_ENABLE_HOME_CLEAR_TEXT, false); }
 
     private static void saveHomeClearTextEnabled(boolean enabled) {
         try {
@@ -5653,14 +5712,7 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
     }
 
     /** 主页美化:移动添加快捷方式按钮到主页设置旁。 */
-    private static boolean isHomeMoveBtnEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_HOME_MOVE_BTN, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isHomeMoveBtnEnabled() { return readBoolPref(KEY_ENABLE_HOME_MOVE_BTN, false); }
 
     /**
      * 与 {@link #isHomeMoveBtnEnabled()} 同义,但能区分"确实关着"与"读不到"。
@@ -5959,9 +6011,10 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
                 } catch (Throwable ignored) {}
             }
             // 三星 Toolbar 自定义图标类(重写 setImageDrawable 不调父类): 按类名 hook 其 setImageDrawable
+            // 2026-10-13 清理：原先还列了 common.widget.ToolbarImageButton / ToolbarImageView，
+            // 但这两个类在 30.0.0.67 与 31.0.0.64 的 dex 里**都不存在**（已双重确认），
+            // 每次启动都白抛两次 ClassNotFound。真正存在的是下面 toolbar 包里的两个。
             for (String tn : new String[]{
-                "com.sec.android.app.sbrowser.common.widget.ToolbarImageButton",
-                "com.sec.android.app.sbrowser.common.widget.ToolbarImageView",
                 "com.sec.android.app.sbrowser.toolbar.ToolbarImageButton",
                 "com.sec.android.app.sbrowser.toolbar.ToolbarImageView"}) {
                 try {
@@ -6181,12 +6234,16 @@ private static boolean isThemeMasterEnabled() {
     private static boolean isThemeActive() {
         try {
             android.content.Context ctx = sAppContext;
-            if (ctx == null) return false;
+            if (ctx == null) { warnPrefOnce("isThemeActive", "sAppContext null"); return false; }
             // 缓存版:主开关 + 是否有任一 slot 被设置。原实现每次都轮询 10 个 slot
             // 各读一次 SharedPreferences,在着色热路径上开销显著。
             return ThemeColorHelper.masterEnabled(ctx) && ThemeColorHelper.anySlotSet(ctx);
-        } catch (Throwable ignored) {}
-        return false;
+        } catch (Throwable t) {
+            // 2026-10-09 审核 M3：原为空 catch 直接 return false —— 与"主题未启用"
+            // 无法区分，主题静默不生效时用户无从知道原因。
+            warnPrefOnce("isThemeActive", String.valueOf(t));
+            return false;
+        }
     }
 
     private static void applyTextColor(Object obj) {
@@ -6853,7 +6910,7 @@ private static boolean isThemeMasterEnabled() {
         }
     }
 
-    /** 主页时钟设置对话框: 样式(普通/翻页) + 精确到秒 + 位置/大小。 */
+    /** 主页时钟设置对话框: 样式(普通/翻页) + 精确到秒 + 24 小时制 + 位置/大小。 */
     private static void showHomeClockSettingsDialog(final android.app.Activity act, final android.content.Context ctx) {
         try {
             final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(act)
@@ -6882,6 +6939,23 @@ private static boolean isThemeMasterEnabled() {
             rowSec.addView(tvSec);
             rowSec.addView(swSec);
             root.addView(rowSec);
+
+            // 24 小时制(2026-10-09 新增: 翻页时钟重写时一并补上; 两种样式都生效)
+            final android.widget.LinearLayout rowHour = new android.widget.LinearLayout(act);
+            rowHour.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            rowHour.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            android.widget.LinearLayout.LayoutParams rowHourLp = new android.widget.LinearLayout.LayoutParams(-1, -2);
+            rowHourLp.topMargin = dp(act, 6);
+            rowHour.setLayoutParams(rowHourLp);
+            final android.widget.TextView tvHour = new android.widget.TextView(act);
+            tvHour.setText(T("24 小时制", "24-hour"));
+            tvHour.setTextSize(14);
+            tvHour.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0, -2, 1f));
+            final android.widget.Switch swHour = new android.widget.Switch(act);
+            swHour.setChecked(HomeClockHelper.is24Hour(ctx));
+            rowHour.addView(tvHour);
+            rowHour.addView(swHour);
+            root.addView(rowHour);
 
             // 显示日期行
             final android.widget.LinearLayout rowDate = new android.widget.LinearLayout(act);
@@ -6916,6 +6990,47 @@ private static boolean isThemeMasterEnabled() {
             spStyle.setAdapter(styleAd);
             spStyle.setSelection(HomeClockHelper.getClockStyle(ctx) == 1 ? 1 : 0);
             root.addView(spStyle);
+
+            // 数字字体（仅翻页样式生效）
+            final android.widget.TextView tvFont = new android.widget.TextView(act);
+            tvFont.setText(T("数字字体（翻页样式）", "Digit font (flip style)"));
+            tvFont.setTextSize(14);
+            android.widget.LinearLayout.LayoutParams tvFontLp = new android.widget.LinearLayout.LayoutParams(-1, -2);
+            tvFontLp.topMargin = dp(act, 10);
+            tvFont.setLayoutParams(tvFontLp);
+            root.addView(tvFont);
+            // 2026-10-12 收窄为两项：只有「默认」与「跟随自定义字体」。
+            //
+            // 为什么删掉原来的另外 10 项（4 个系统字体族名 + 6 款打包字体）：
+            //   1. 系统字体族名（"Arial Bold" / "超世紀新粗黑" / "sans-serif" / "monospace"）
+            //      在设备上不存在时，Typeface.create 会**静默返回默认字体** ——
+            //      用户以为换了字体、实际没换，FlipClockView.resolveTypeface 只能事后探测。
+            //   2. 打包字体里，6 款只是同一族不同观感的替代品，与「默认」功能重叠，
+            //      却让"选了什么"和"看起来是什么"难以对应。
+            // 只留两种结果确定、可复现的取值：
+            //   · 默认            = 打包字体 assets/fonts/ArialEnUnicodeBold.ttf（跨设备一致）
+            //   · 跟随自定义字体  = FontHelper 里用户自己导入并选中的 ttf/otf
+            //
+            // 旧值不会残留：HomeClockHelper.FONT_SCHEME 已 +1（一次性把旧选择顶回默认），
+            // 且 getFontFamily 对白名单外的值做归一，不会出现"界面显示默认、实际是别的字体"。
+            final String[] FONT_NAMES = {
+                    T("默认", "Default"),
+                    T("跟随自定义字体", "Custom font") };
+            final String[] FONT_VALUES = {
+                    HomeClockHelper.DEFAULT_FONT, HomeClockHelper.CUSTOM_FONT };
+            final android.widget.Spinner spFont = new android.widget.Spinner(act);
+            android.widget.ArrayAdapter<String> fontAd = new android.widget.ArrayAdapter<>(act,
+                    android.R.layout.simple_spinner_item, FONT_NAMES);
+            fontAd.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            spFont.setAdapter(fontAd);
+            final String curFont = HomeClockHelper.getFontFamily(ctx);
+            // 先兜底选 0：万一 prefs 里仍是白名单外的旧值（旧版本升级而来、或备份还原），
+            // 界面必须如实显示"默认"，而不是停在上一次的选中位置。
+            spFont.setSelection(0);
+            for (int fi = 0; fi < FONT_VALUES.length; fi++) {
+                if (FONT_VALUES[fi].equals(curFont)) spFont.setSelection(fi);
+            }
+            root.addView(spFont);
 
             // 跟随搜索框动画
             final android.widget.LinearLayout rowFol = new android.widget.LinearLayout(act);
@@ -6975,8 +7090,10 @@ private static boolean isThemeMasterEnabled() {
                             @Override public void onClick(android.view.View v) {
                                 try {
                                     HomeClockHelper.setSeconds(ctx, swSec.isChecked());
+                                    HomeClockHelper.set24Hour(ctx, swHour.isChecked());
                                     HomeClockHelper.setShowDate(ctx, swDate.isChecked());
                                     HomeClockHelper.setClockStyle(ctx, spStyle.getSelectedItemPosition());
+                                    HomeClockHelper.setFontFamily(ctx, FONT_VALUES[spFont.getSelectedItemPosition()]);
                                     HomeClockHelper.setFollow(ctx, swFol.isChecked());
                                     try { refreshHomeClock(); } catch (Throwable ignored2) {}
                                     toastOnMain(T("已保存", "Saved"));
@@ -7934,7 +8051,7 @@ private static boolean isThemeMasterEnabled() {
                 final Object rowF = row;
                 final java.io.File vF = v;
                 final Context ctxF = ctx;
-                new Thread(new Runnable() {
+                SbExecutors.heavy(new Runnable() {
                     @Override public void run() {
                         try {
                             final String thumb = ensureVideoThumb(ctxF, vF);
@@ -7962,7 +8079,7 @@ private static boolean isThemeMasterEnabled() {
                             MainModule.logMsg("[SBPlus] thumb thread ERR: " + t);
                         }
                     }
-                }).start();
+                });
             } catch (Throwable ignoredIcon) {}
 
             bindVideoItemClick(row, cl, v);
@@ -9506,14 +9623,7 @@ private static void showUaGroupDialog(final Context ctx) {
         }
     }
 
-    private static boolean isBridgeEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_BRIDGE, true);
-            }
-        } catch (Throwable ignored) {}
-        return true;
-    }
+    private static boolean isBridgeEnabled() { return readBoolPref(KEY_ENABLE_BRIDGE, true); }
 
     private static void saveBridgeEnabled(boolean enabled) {
         try {
@@ -9525,14 +9635,7 @@ private static void showUaGroupDialog(final Context ctx) {
         }
     }
 
-    private static boolean isGridMenuEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_GRID_MENU, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isGridMenuEnabled() { return readBoolPref(KEY_ENABLE_GRID_MENU, false); }
 
     private static void saveGridMenuEnabled(boolean enabled) {
         try {
@@ -9546,14 +9649,7 @@ private static void showUaGroupDialog(final Context ctx) {
         FeatureToggles.onToggleChanged("more-menu-grid", enabled);
     }
 
-    private static boolean isRegionLockEnabled() {
-        try {
-            if (sAppContext != null) {
-                return processPrefs(sAppContext).getBoolean(KEY_ENABLE_REGION_LOCK, false);
-            }
-        } catch (Throwable ignored) {}
-        return false;
-    }
+    private static boolean isRegionLockEnabled() { return readBoolPref(KEY_ENABLE_REGION_LOCK, false); }
 
     private static void saveRegionLockEnabled(boolean enabled) {
         try {
@@ -10082,11 +10178,19 @@ private static void showUaGroupDialog(final Context ctx) {
         try {
             Class<?> bgCls = loadClassSafely(
                     "com.sec.android.app.sbrowser.quickaccess.ui.page.QuickAccessCustomBackground", cl);
-            Class<?> layoutListener = loadClassSafely(
+            // 旧签名才需要这个监听器类型；用 findClassIfExists 而非 loadClassSafely —— 后者
+            // 失败会抛异常，会把「尝试新签名」的机会一起吞掉。
+            Class<?> layoutListener = findClassIfExists(
                     "android.view.View$OnLayoutChangeListener", cl);
-            findAndHookMethod(bgCls, "onFinishInflate",
-                    layoutListener, Runnable.class,
-                    new XC_MethodHook() {
+            // 2026-10-09 适配 31.0.0.64：该三星自定义方法的**签名随版本变化**，必须多签名回退，
+            // 否则新版静默失效。真机日志实测（31.0.0.64）：
+            //   [SBPlus] video bg view hook failed: java.lang.RuntimeException:
+            //     java.lang.NoSuchMethodException: ...QuickAccessCustomBackground.onFinishInflate
+            //     [interface android.view.View$OnLayoutChangeListener, interface java.lang.Runnable]
+            // 对照两版反编译：
+            //   v30.0.0.67: onFinishInflate(View$OnLayoutChangeListener, Runnable)
+            //   v31.0.0.64: onFinishInflate(Runnable)        ← 去掉了第一个参数
+            final XC_MethodHook bgHook = new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             try {
@@ -10144,10 +10248,34 @@ private static void showUaGroupDialog(final Context ctx) {
                                 MainModule.logMsg("[SBPlus] attachVideoBackground error: " + t);
                             }
                         }
-                    });
-            MainModule.logMsg("[SBPlus] QuickAccessCustomBackground.onFinishInflate hooked");
+                    };
+            // 候选签名按「新版优先」排序，任一命中即用；全部失败才记失败日志。
+            java.util.List<Class<?>[]> bgSigs = new java.util.ArrayList<Class<?>[]>();
+            bgSigs.add(new Class<?>[]{Runnable.class});                      // v31.0.0.64
+            if (layoutListener != null) {
+                bgSigs.add(new Class<?>[]{layoutListener, Runnable.class});  // v30.0.0.67 及更早
+            }
+            boolean bgHooked = false;
+            Throwable bgLastErr = null;
+            for (Class<?>[] sig : bgSigs) {
+                try {
+                    Object[] callArgs = new Object[sig.length + 1];
+                    System.arraycopy(sig, 0, callArgs, 0, sig.length);
+                    callArgs[sig.length] = bgHook;
+                    findAndHookMethod(bgCls, "onFinishInflate", callArgs);
+                    bgHooked = true;
+                    MainModule.logMsg("[SBPlus] QuickAccessCustomBackground.onFinishInflate hooked"
+                            + " (signature=" + java.util.Arrays.toString(sig) + ")");
+                    break;
+                } catch (Throwable e) {
+                    bgLastErr = e;
+                }
+            }
+            if (!bgHooked) {
+                MainModule.logMsg("[SBPlus] video bg view hook failed (all signatures): " + bgLastErr);
+            }
         } catch (Throwable t) {
-            MainModule.logMsg("[SBPlus] video bg view hook failed: " + t);
+            MainModule.logMsg("[SBPlus] video bg hook setup failed: " + t);
         }
 
         // (3) 主页 UI 改造:移动T("添加快捷方式", "Add shortcut")按钮 + 搜索框透明化。
@@ -10339,6 +10467,16 @@ private static void showUaGroupDialog(final Context ctx) {
                                     if (act != null && act.getWindow() != null && act.getWindow().getDecorView() != null) {
                                         applyFontRecursive(act.getWindow().getDecorView().getRootView(), tf);
                                     }
+                                    // 翻页时钟（FlipClockView）是纯 Canvas 自绘的 View，不是
+                                    // TextView —— 上面的递归换字体覆盖不到它，必须显式注入。
+                                    // 只在用户选了"跟随自定义字体"时才有意义，但重复 set 同一
+                                    // 个 Typeface 是幂等的（setCustomTypeface 里先判等），所以直接设。
+                                    try {
+                                        if (sHomeClockTv instanceof com.sbplus.browser.widget.FlipClockView) {
+                                            ((com.sbplus.browser.widget.FlipClockView) sHomeClockTv)
+                                                    .setCustomTypeface(tf);
+                                        }
+                                    } catch (Throwable ignoredClock) {}
                                     java.util.List<android.widget.TextView> list;
                                     synchronized (sPendingFontViews) {
                                         list = new java.util.ArrayList<>(sPendingFontViews);
@@ -10542,12 +10680,21 @@ private static void showUaGroupDialog(final Context ctx) {
                             root.postDelayed(new Runnable() {
                                 @Override public void run() {
                                     if (VERBOSE_LAYOUT_LOG) MainModule.logMsg("[SBPlus] home postDelayed(400) fired");
-                                    // 2026-09-17:先在**任何开关判断之前**隐藏原格子。
-                                    // 这样即使 moveOn 读不到、或按钮早已插入(幂等短路),
-                                    // 原格子也每次都会被重新隐藏 —— 修复"新按钮出现了、
-                                    // 原按钮还在"。它必须放在 return 之前,否则又会被跳过。
-                                    try { hideOriginalAddCell(root); } catch (Throwable ignored) {}
-                                    try { keepOriginalAddCellHidden(root); } catch (Throwable ignored) {}
+                                    // 2026-10-09 适配 31.0.0.64：隐藏原格子的时机由「开关判断之前」
+                                    // 改为「开关确认开启之后」。
+                                    //
+                                    // 原实现（2026-09-17）为了修复"新按钮出现了、原按钮还在"，
+                                    // 把 hideOriginalAddCell / keepOriginalAddCellHidden 放在所有
+                                    // return 之前**无条件**执行。副作用是：当
+                                    // KEY_ENABLE_HOME_MOVE_BTN 为 false 时，原网格格子照样被隐藏，
+                                    // 而新按钮又不会插入（下面的 if (!moveOn) return）——
+                                    // 用户看到的就是「主页的添加快捷方式按钮没有了」。
+                                    // 真机日志实证：只有 quickaccess ui tweaks applied，
+                                    // 没有 add shortcut button inserted，也没有
+                                    // move-btn setting not readable yet（说明读到的确实是 false）。
+                                    //
+                                    // 现在只在开关确认开启后才隐藏原格子；rearrangeQuickAccessButtons()
+                                    // 内部本来也有一处 hideOriginalAddCell，两条路径都覆盖到。
                                     try {
                                         // 2026-09-17:开关读不到时要**重试**,不能直接放弃。
                                         // 冷启动首次 400ms 时 sAppContext 可能还没捕获,
@@ -10574,6 +10721,9 @@ private static void showUaGroupDialog(final Context ctx) {
                                             return;
                                         }
                                         if (!moveOn) return;
+                                        // 开关确认开启 → 此时才隐藏原网格里的"添加"格子
+                                        try { hideOriginalAddCell(root); } catch (Throwable ignored) {}
+                                        try { keepOriginalAddCellHidden(root); } catch (Throwable ignored) {}
                                         rearrangeQuickAccessButtons(root);
                                     } catch (Throwable t) {
                                         MainModule.logMsg("[SBPlus] rearrange err: " + t);
@@ -10868,9 +11018,35 @@ private static void showUaGroupDialog(final Context ctx) {
         // 否则 LEFT_OF 规则会把按钮压成 0 宽。
         android.view.ViewGroup insertTarget;
         int insertIndex;
-        if (mgmtParent instanceof android.widget.RelativeLayout
-                && mgmtParent.getParent() instanceof android.widget.LinearLayout) {
-            insertTarget = (android.view.ViewGroup) mgmtParent.getParent();
+        // 2026-10-09 适配 31.0.0.64 —— 修复用户反馈「主页的添加快捷方式按钮没有了」。
+        //
+        // 旧版 res/layout/homepage_header.xml：
+        //   LinearLayout(根)
+        //     └ RelativeLayout            <- general_management 的父
+        //         ├ ImageButton@general_management
+        //         └ LinearLayout(badge + account)
+        // 31.0.0.64 改为：
+        //   LinearLayout(根)
+        //     ├ FrameLayout               <- general_management 的父（新增，无 id，含 shadow 层）
+        //     │   ├ ImageView@general_management_shadow
+        //     │   └ ImageButton@general_management   （宽高改为 fill_parent）
+        //     └ FrameLayout@account_container
+        //         ├ ImageView@account_shadow
+        //         └ ImageButton@account
+        //
+        // 原判据只认 RelativeLayout，于是 31.x 走 else 分支 → insertTarget = FrameLayout。
+        // **FrameLayout 是堆叠容器**，把新按钮 addView 进去后它与 general_management 重叠，
+        // 而 general_management 是 fill_parent，正好把新按钮整个盖住 —— 按钮存在于视图树、
+        // 日志也打「inserted」成功，但肉眼完全看不见；同时原网格格子已被 hideOriginalAddCell
+        // 隐藏，最终表现就是「添加快捷方式按钮没有了」。
+        //
+        // 新判据：只要 mgmt 的父容器**不是并排容器（LinearLayout）**，就说明它是堆叠容器
+        // （RelativeLayout ≤30.x / FrameLayout 31.x），此时必须把按钮插到**祖父 LinearLayout**
+        // 中、父容器之前，两个按钮才会真正并排。两种版本都能正确落位。
+        android.view.ViewParent mgmtGrandparent = mgmtParent.getParent();
+        if (!(mgmtParent instanceof android.widget.LinearLayout)
+                && mgmtGrandparent instanceof android.widget.LinearLayout) {
+            insertTarget = (android.view.ViewGroup) mgmtGrandparent;
             insertIndex = insertTarget.indexOfChild(mgmtParent);
         } else {
             insertTarget = mgmtParent;
@@ -10914,6 +11090,13 @@ private static void showUaGroupDialog(final Context ctx) {
                 + " target=" + insertTarget.getClass().getSimpleName()
                 + " idx=" + insertIndex);
         if (size <= 0) size = mgmt.getWidth();
+        if (size <= 0) {
+            // 2026-10-09 适配 31.0.0.64：新版的 general_management 宽高是 fill_parent
+            // （lp.width = -1），若它自身尚未测量完成，就退回用其父容器
+            // （FrameLayout，尺寸固定为 @dimen/quickaccess_header_button_size）的宽度
+            // —— 两者本就等宽，比走 defer 重试更直接。
+            try { if (mgmtParent.getWidth() > 0) size = mgmtParent.getWidth(); } catch (Throwable ignored) {}
+        }
         if (size <= 0) {
             // 2026-09-17:布局尚未完成时,mgmt 的宽度取不到(0)。
             // 旧实现会退回一个 24dp 的兜底值继续插入 —— 那样插出来的按钮尺寸
@@ -12133,7 +12316,9 @@ private static void showUaGroupDialog(final Context ctx) {
                     + "|" + HomeClockHelper.getDatePosY(ctx)
                     + "|" + HomeClockHelper.getDateSizePct(ctx)
                     + "|" + HomeClockHelper.isDateFollow(ctx)
-                    + "|" + HomeClockHelper.getClockStyle(ctx);
+                    + "|" + HomeClockHelper.getClockStyle(ctx)
+                    + "|" + HomeClockHelper.is24Hour(ctx)
+                    + "|" + HomeClockHelper.getFontFamily(ctx);
         } catch (Throwable t) { return "clock"; }
     }
 
@@ -12412,488 +12597,8 @@ private static void showUaGroupDialog(final Context ctx) {
 
     // ===== 主页时钟 =====
     private static android.view.View sHomeClockTv;
-    /** 翻页卡片样式: 每位数字一张 FlipCard。 */
-    private static FlipCard[] sHomeClockFlipCards;
-    private static String sHomeClockFlipLast = "";
     private static android.view.View sHomeClockDateTv;   // 日期行(可选)
 
-    /**
-     * 翻页时钟的单张数字卡片 —— 严格照 FlipClock 0.7.7 的 DOM 结构搭。
-     *
-     * <p>库源码 {@code List.createListItem() / createList()} 生成的层级是:
-     * <pre>
-     *   ul.flip[.play]
-     *    ├ li.flip-clock-before        ← 旧值, 完整一套(上+下)
-     *    │  └ a
-     *    │     ├ div.up   { div.shadow, div.inn }
-     *    │     └ div.down { div.shadow, div.inn }
-     *    └ li.flip-clock-active        ← 新值, 完整一套(上+下)
-     *       └ a
-     *          ├ div.up   { div.shadow, div.inn }
-     *          └ div.down { div.shadow, div.inn }
-     * </pre>
-     *
-     * <p><b>关键</b>: 是"两层完整数字叠加", 不是"一张卡上下两半"。
-     * 每个 {@code .up} 和每个 {@code .down} 都各自带一个 {@code .shadow};
-     * 每个 {@code .inn} 都是 {@code height:200%} 且 {@code .up>.inn{top:0}} /
-     * {@code .down>.inn{bottom:0}} —— 同一个数字在两半各自贴边, 所以跨中缝连续。
-     *
-     * <p>翻页时的层序交接(源码 {@code @keyframes asd})是这套结构能成立的前提:
-     * 旧叶片必须盖住新数字, 直到叶片翻过 20% 才交出层级。
-     */
-    private static class FlipCard {
-        android.widget.FrameLayout root;
-        /** 旧值层(li.flip-clock-before): 完整一套数字, 上半可旋转翻走。 */
-        android.widget.FrameLayout beforeUp, beforeDown;
-        /** 新值层(li.flip-clock-active): 完整一套数字, 下半可旋转落回。 */
-        android.widget.FrameLayout activeUp, activeDown;
-        /** 两个可旋转的叶片(源码里的 animation 载体)。 */
-        android.widget.FrameLayout beforeUpLeaf, activeDownLeaf;
-        /** 叶片上的暗化遮罩(对应 div.shadow)。 */
-        android.view.View beforeUpShade, beforeDownShade, activeUpShade, activeDownShade;
-        /** 四个数字(div.inn): before 的上下、active 的上下。 */
-        android.widget.TextView beforeUpTv, beforeDownTv, activeUpTv, activeDownTv;
-        /** 中缝线 div.up:after (top:44px; height:3px)。 */
-        android.view.View seam;
-        int w, h;
-        int cardW;    // 与 w 相同; 保留字段避免调用处大改
-        int gap;      // 恒为 0: 源码两半各占 50%
-        int halfH;    // 单块高度
-        int radius;   // 圆角
-        String value = "";
-    }
-
-    /**
-     * 翻页卡片几何比例 —— 全部取自 FlipClock 0.7.8 的 flipclock.css, 不做主观调整。
-     *
-     * <pre>
-     *   ul { width:60px; height:90px; font-size:70px(inn); border-radius:6px }
-     *   li a { perspective: 200px }
-     *   .up:after { top:44px; height:3px }
-     *   turn2: rotateX(0 -> -90deg) 0.5s linear
-     *   turn : rotateX(90 -> 0deg)  0.5s linear 0.5s
-     * </pre>
-     */
-    static final float CARD_W_RATIO = 60f / 90f;        // 宽:高
-    static final float PERSPECTIVE_RATIO = 200f / 90f;  // CSS perspective 200px / 卡高 90px
-    static final int FLIP_DUR_MS = 500;                 // 源码 0.5s
-
-    /**
-     * 造一个整卡高度的数字层。
-     *
-     * <p>对应 FlipClock 源码里的 {@code div.inn { height:200%; font-size:70px }}:
-     * 数字层比半块高一倍, 由所在半块的 {@code overflow:hidden} 裁出该露的一半 ——
-     * 所以上块贴顶(top:0)、下块贴底(bottom:0), 同一个数字在两块里必然对齐。
-     *
-     * @param fontPx 数字字号(已含 sizePct)
-     */
-    private static android.widget.TextView mkFullDigit(android.content.Context ctx, float fontPx, int color) {
-        android.widget.TextView tv = new android.widget.TextView(ctx);
-        // 源码 font-size:70px / 卡片高 90px → 0.778; 这里按整卡高比例给字号
-        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, fontPx);
-        tv.setTextColor(color);
-        // 网站字体: .flip-clock-wrapper { font:normal 11px "Helvetica Neue",Helvetica,sans-serif }
-        // 默认字体档 .fc-font-default 是空规则, 所以实际走这条 sans-serif(不是等宽)。
-        tv.setTypeface(android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD));
-        tv.setGravity(android.view.Gravity.CENTER);
-        // 网站数字投影: text-shadow:0 1px 2px #000 —— 让数字浮在卡片上
-        tv.setShadowLayer(Math.max(1f, fontPx * (2f / 70f)),
-                Math.max(0f, fontPx * (0f / 70f)), fontPx * (1f / 70f), 0xFF000000);
-        try { tv.setIncludeFontPadding(false); } catch (Throwable ignored) {}
-        return tv;
-    }
-
-    /**
-     * 造一张翻页数字卡 —— 结构照抄 FlipClock 0.7.7 的 createListItem()/createList()。
-     *
-     * <p><b>几何全部按源码翻译</b>(flipclock.css), 不做主观调整:
-     * <pre>
-     *   ul      { width:60px; height:90px; border-radius:6px; background:#000 }
-     *   li a    { perspective:200px }
-     *   div     { height:50%; overflow:hidden }
-     *   div.up  { transform-origin:50% 100%; top:0 }
-     *   div.down{ transform-origin:50% 0;    bottom:0 }
-     *   div.inn { height:200%; font-size:70px; border-radius:6px }
-     *   .up>.inn{ top:0 }   .down>.inn{ bottom:0 }
-     *   .up:after { top:44px; height:3px; background:rgba(0,0,0,.4) }
-     * </pre>
-     * 按 90px 卡高等比放大到 fontPx 尺度: 宽 60/90、字号 70/90、圆角 6/90、缝 3/90。
-     *
-     * <p>半块用 {@link HalfLeaf} 造: 一个"裁剪窗口"(高度 50%)里放一个 height:200%
-     * 的数字, 上块贴顶、下块贴底。旋转由外层 FrameLayout 承担, 裁剪窗不动。
-     */
-    private static FlipCard makeFlipCard(android.content.Context ctx, float fontPx, int digitColor, int cardColor) {
-        // 以"整卡高"为基准, 按源码 90px 卡的比例换算
-        int h = Math.max(2, Math.round(fontPx * 0.90f));                 // 90/100
-        int w = Math.max(1, Math.round(h * CARD_W_RATIO));               // 60/90
-        int halfH = h / 2;                                               // 50%
-        int radius = Math.max(1, Math.round(h * (6f / 90f)));            // 6px
-        int seamH = Math.max(1, Math.round(h * (3f / 90f)));             // 3px
-        // 数字字号 = 整卡高 × 70/90 (源码 font-size:70px 对 height:90px)
-        int digitPx = Math.round(h * (70f / 90f));
-
-        FlipCard fc = new FlipCard();
-        fc.w = w; fc.h = h; fc.cardW = w; fc.halfH = halfH; fc.radius = radius; fc.gap = 0;
-
-        android.widget.FrameLayout card = new android.widget.FrameLayout(ctx);
-        card.setBackgroundColor(0x00000000);
-        card.setClipChildren(false);
-        card.setClipToPadding(false);
-        card.setPersistentDrawingCache(android.view.ViewGroup.PERSISTENT_NO_CACHE);
-        fc.root = card;
-
-        // 底层黑底(源码 ul background:#000) —— 中缝处露出来的就是它
-        android.view.View plateV = new android.view.View(ctx);
-        android.graphics.drawable.GradientDrawable plate = new android.graphics.drawable.GradientDrawable();
-        plate.setColor(0xFF000000);
-        plate.setCornerRadius(radius);
-        plateV.setBackground(plate);
-        card.addView(plateV, new android.widget.FrameLayout.LayoutParams(w, h));
-
-        // ---- li.flip-clock-before (旧值) ----
-        // 上叶片: 绕中缝上沿 0°→-90° 翻走
-        fc.beforeUpTv  = mkFullDigit(ctx, digitPx, digitColor);
-        fc.beforeUpShade = makeShadowView(ctx, true);
-        fc.beforeUpLeaf = makeLeaf(ctx, fc.beforeUpTv, fc.beforeUpShade, w, h, halfH, radius, true, true);
-        // 下叶片: 静止不动(旧值的下半一直显示到新叶片落下来盖住它)
-        fc.beforeDownTv = mkFullDigit(ctx, digitPx, digitColor);
-        fc.beforeDownShade = makeShadowView(ctx, false);
-        fc.beforeDown = makeHalfBox(ctx, fc.beforeDownTv, fc.beforeDownShade, w, h, halfH, radius, false);
-
-        // ---- li.flip-clock-active (新值) ----
-        // 上半: 静止, 但被 before 层压着, 等 asd 交接后才露出来
-        fc.activeUpTv = mkFullDigit(ctx, digitPx, digitColor);
-        fc.activeUpShade = makeShadowView(ctx, true);
-        fc.activeUp = makeHalfBox(ctx, fc.activeUpTv, fc.activeUpShade, w, h, halfH, radius, true);
-        // 下叶片: 绕中缝下沿 90°→0° 落回
-        fc.activeDownTv = mkFullDigit(ctx, digitPx, digitColor);
-        fc.activeDownShade = makeShadowView(ctx, false);
-        fc.activeDownLeaf = makeLeaf(ctx, fc.activeDownTv, fc.activeDownShade, w, h, halfH, radius, false, false);
-
-        // 层序(对应 z-index): before 层在下, active 层在上;
-        // 翻页开始 20% 后 before 的上叶片 bringToFront 压到最上(源码 asd)。
-        android.widget.FrameLayout.LayoutParams upLp =
-                new android.widget.FrameLayout.LayoutParams(w, halfH);
-        upLp.gravity = android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL;
-        android.widget.FrameLayout.LayoutParams loLp =
-                new android.widget.FrameLayout.LayoutParams(w, halfH);
-        loLp.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL;
-
-        card.addView(fc.beforeDown, loLp);      // 旧值下半(最底)
-        card.addView(fc.beforeUpLeaf, upLp);    // 旧值上半叶片
-        card.addView(fc.activeUp, upLp);        // 新值上半
-        card.addView(fc.activeDownLeaf, loLp);  // 新值下半叶片(最上)
-
-        // 中缝线: 源码 div.up:after { top:44px; height:3px; background:rgba(0,0,0,.4) }
-        // z-index:5, 压在所有层之上, 是"两半之间有道缝"的关键视觉标记。
-        fc.seam = new android.view.View(ctx);
-        android.graphics.drawable.GradientDrawable seamBg = new android.graphics.drawable.GradientDrawable();
-        seamBg.setColor(0x66000000);
-        fc.seam.setBackground(seamBg);
-        android.widget.FrameLayout.LayoutParams seamLp =
-                new android.widget.FrameLayout.LayoutParams(w, seamH);
-        seamLp.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL;
-        card.addView(fc.seam, seamLp);
-        return fc;
-    }
-
-    /**
-     * 造一个"静止半块"(源码里没有 animation 的那个 div.up / div.down):
-     * 裁剪窗 + 数字 + shadow, 不参与旋转。
-     */
-    private static android.widget.FrameLayout makeHalfBox(android.content.Context ctx,
-                                                          android.widget.TextView tv, android.view.View shade,
-                                                          int w, int h, int halfH, int radius,
-                                                          boolean upper) {
-        android.widget.FrameLayout box = new android.widget.FrameLayout(ctx);
-        box.setClipChildren(true);
-        box.setClipToPadding(true);
-        // 色块(带圆角, 贴中缝的两角是直角)
-        android.view.View bg = new android.view.View(ctx);
-        bg.setBackground(halfBg(radius, upper));
-        box.addView(bg, new android.widget.FrameLayout.LayoutParams(w, halfH));
-        // 数字: height:200%, 上块贴顶 / 下块贴底
-        android.widget.FrameLayout clip = new android.widget.FrameLayout(ctx);
-        clip.setClipChildren(true);
-        int dy = upper ? 0 : -halfH;      // 下块的数字整体上移半块
-        clip.addView(tv, digitLp(w, h, dy));
-        box.addView(clip, new android.widget.FrameLayout.LayoutParams(w, halfH));
-        // shadow 盖在数字上
-        box.addView(shade, new android.widget.FrameLayout.LayoutParams(w, halfH));
-        return box;
-    }
-
-    /**
-     * 造一个"可旋转叶片"(源码里带 animation 的那个 div.up / div.down)。
-     *
-     * <p>返回的是外层旋转容器; 内部的裁剪窗与数字不随旋转"变形继承" ——
-     * Android 的 rotationX 是整棵子树一起转, 这与 CSS 一致(整片叶子一起转),
-     * 数字跟着压缩正是翻页钟该有的样子。
-     */
-    private static android.widget.FrameLayout makeLeaf(android.content.Context ctx,
-                                                       android.widget.TextView tv, android.view.View shade,
-                                                       int w, int h, int halfH, int radius,
-                                                       boolean upper, boolean isBeforeUp) {
-        android.widget.FrameLayout leaf = new android.widget.FrameLayout(ctx);
-        leaf.setClipChildren(true);
-        leaf.setClipToPadding(true);
-        android.view.View bg = new android.view.View(ctx);
-        bg.setBackground(halfBg(radius, upper));
-        leaf.addView(bg, new android.widget.FrameLayout.LayoutParams(w, halfH));
-        android.widget.FrameLayout clip = new android.widget.FrameLayout(ctx);
-        clip.setClipChildren(true);
-        int dy = upper ? 0 : -halfH;
-        clip.addView(tv, digitLp(w, h, dy));
-        leaf.addView(clip, new android.widget.FrameLayout.LayoutParams(w, halfH));
-        leaf.addView(shade, new android.widget.FrameLayout.LayoutParams(w, halfH));
-        // 旋转轴心: 上半绕底边(中缝上沿), 下半绕顶边(中缝下沿)
-        leaf.setPivotX(w / 2f);
-        leaf.setPivotY(upper ? halfH : 0f);
-        return leaf;
-    }
-
-    /** 半块色块: 上半圆上面两角、下半圆下面两角, 贴中缝的两角是直角。 */
-    private static android.graphics.drawable.GradientDrawable halfBg(int radius, boolean upper) {
-        android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
-        d.setColor(0xFF333333);   // 源码 .inn { background-color:#333333 }
-        d.setCornerRadii(upper
-                ? new float[]{ radius, radius, radius, radius, 0, 0, 0, 0 }
-                : new float[]{ 0, 0, 0, 0, radius, radius, radius, radius });
-        return d;
-    }
-
-    /**
-     * 造一个 shadow 层(源码 div.shadow)。
-     *
-     * <p>源码里每个 .up / .down 各带一个 shadow, 基础 opacity 由动画驱动:
-     * <pre>
-     *   li.before .up/.down .shadow { animation: show 0.5s linear both }
-     *   li.active .up/.down .shadow { animation: hide 0.5s 0.3s linear both }
-     *   @keyframes show { 0%{opacity:0} 100%{opacity:1} }
-     *   @keyframes hide { 0%{opacity:1} 100%{opacity:0} }
-     * </pre>
-     * 渐变方向: .up 是"上浅下深"(to bottom, rgba(0,0,0,.1) → black),
-     * .down 是"上深下浅"(to bottom, black → rgba(0,0,0,.1))。
-     */
-    private static android.view.View makeShadowView(android.content.Context ctx, boolean upper) {
-        android.view.View v = new android.view.View(ctx);
-        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
-        g.setOrientation(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
-        g.setColors(upper
-                ? new int[]{ 0x1A000000, 0xFF000000 }    // rgba(0,0,0,.1) → black
-                : new int[]{ 0xFF000000, 0x1A000000 });  // black → rgba(0,0,0,.1)
-        v.setBackground(g);
-        v.setAlpha(0f);
-        return v;
-    }
-
-    /**
-     * 把整块叶子的绘制裁进圆角外形(色块+数字+遮罩一起裁)。
-     *
-     * <p>只给色块设圆角是不够的: 遮罩/数字都还在矩形框里画, 一翻就把圆角"盖平"。
-     * 用 clipToOutline + 圆角凸路径, 整片叶子无论转到什么角度都保持外形。
-     */
-    private static void clipLeafRound(android.view.View leaf, final int w, final int h, final int radius,
-                                      final boolean upper) {
-        try {
-            leaf.setClipToOutline(true);
-            leaf.setOutlineProvider(new android.view.ViewOutlineProvider() {
-                @Override public void getOutline(android.view.View v, android.graphics.Outline o) {
-                    try {
-                        android.graphics.Path p = new android.graphics.Path();
-                        float[] r = upper
-                                ? new float[]{ radius, radius, radius, radius, 0, 0, 0, 0 }
-                                : new float[]{ 0, 0, 0, 0, radius, radius, radius, radius };
-                        p.addRoundRect(new android.graphics.RectF(0, 0, v.getWidth(), v.getHeight()), r,
-                                android.graphics.Path.Direction.CW);
-                        o.setConvexPath(p);
-                    } catch (Throwable t) {
-                        o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
-                    }
-                }
-            });
-        } catch (Throwable ignored) {}
-    }
-    /**
-     * 造一块色块(纯色, 不加描边/投影)。
-     *
-     * <p>参考实现(flipclock.online)的黑卡就是纯黑平面: 没有边框、没有阴影、没有外扩,
-     * 体积感完全来自叶片旋转时的收缩。之前加的描边/投影都是多余装饰, 反而让边角发亮、
-     * 左右看起来不一样。
-     */
-    private static android.widget.FrameLayout makeBlockLayer(android.content.Context ctx,
-                                                             android.graphics.drawable.Drawable blockBg,
-                                                             int w, int h, int radius) {
-        android.widget.FrameLayout layer = new android.widget.FrameLayout(ctx);
-        layer.setClipChildren(false);
-        android.view.View blockV = new android.view.View(ctx);
-        blockV.setBackground(blockBg);
-        layer.addView(blockV, new android.widget.FrameLayout.LayoutParams(w, h));
-        return layer;
-    }
-
-    private static android.widget.FrameLayout.LayoutParams digitLp(int w, int h, int topOffset) {
-        android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, h);
-        lp.gravity = android.view.Gravity.TOP | android.view.Gravity.LEFT;
-        lp.topMargin = topOffset;
-        return lp;
-    }
-
-    /** 一块半高色块(四角都是圆角)。 */
-    private static android.view.View newHalfBlock(android.content.Context ctx,
-                                                   android.graphics.drawable.Drawable bg, int w, int h, boolean upper) {
-        android.view.View v = new android.view.View(ctx);
-        v.setBackground(bg);
-        return v;
-    }
-
-    /** 半高色块的布局参数(上块贴顶, 下块贴底, 中间留 gap)。 */
-    private static android.widget.FrameLayout.LayoutParams blockLp(int w, int halfH, boolean upper, int gap) {
-        android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, halfH);
-        lp.gravity = upper ? (android.view.Gravity.TOP | android.view.Gravity.LEFT)
-                           : (android.view.Gravity.BOTTOM | android.view.Gravity.LEFT);
-        return lp;
-    }
-
-    /** 把颜色按比例压暗(用于下半底色)。 */
-    private static int darken(int c, float f) {
-        int a = (c >>> 24) & 0xFF;
-        int r = (int)(((c >> 16) & 0xFF) * f);
-        int g = (int)(((c >> 8) & 0xFF) * f);
-        int b = (int)((c & 0xFF) * f);
-        if (a == 0) a = 0xFF;
-        return (a << 24) | (r << 16) | (g << 8) | b;
-    }
-
-    /**
-     * 卡片切到新数字 —— 完全按 FlipClock 0.7.7 的三条动画翻译。
-     *
-     * <pre>
-     *   li.before .up        turn2  rotateX(0  → -90deg)  0.5s linear        无延迟
-     *   li.active .down      turn   rotateX(90 →   0deg)  0.5s linear        delay 0.5s
-     *   li.before .up/.down  .shadow  show  opacity 0→1   0.5s linear        无延迟
-     *   li.active .up/.down  .shadow  hide  opacity 1→0   0.5s linear        delay 0.3s
-     *   li.active            asd    z-index 2 → 4         0.5s linear        delay 0.5s
-     * </pre>
-     *
-     * <p>两条阴影规则方向相反, 是"叶片落地变暗、新数字亮出"的全部来源:
-     * before 的阴影从 0 渐深到 1(翻到中缝时最暗), active 的阴影从 1 渐褪到 0
-     * 且延后 0.3s 才开始 —— 所以不会有"一开始就黑压压"的感觉。
-     */
-    private static void flipCardTo(final FlipCard fc, final String nd) {
-        if (fc == null || nd == null || nd.equals(fc.value)) return;
-        final String od = fc.value;
-        fc.value = nd;
-        try {
-            final int dur = FLIP_DUR_MS;
-            // 源码 perspective:200px 对 90px 卡高等比换算, 不做主观放大。
-            float camDist = fc.h * PERSPECTIVE_RATIO;
-
-            // ---- li.flip-clock-before: 旧值那套 ----
-            fc.beforeUpTv.setText(od);
-            fc.beforeDownTv.setText(od);
-            // ---- li.flip-clock-active: 新值那套 ----
-            fc.activeUpTv.setText(nd);
-            fc.activeDownTv.setText(nd);
-
-            // 上叶片: 复位到 0° 再往 -90° 翻走(Android rotationX 正值 = 顶边倒向屏幕内)
-            fc.beforeUpLeaf.setVisibility(android.view.View.VISIBLE);
-            fc.beforeUpLeaf.setAlpha(1f);
-            fc.beforeUpLeaf.setRotationX(0f);
-            fc.beforeUpLeaf.setCameraDistance(camDist);
-            fc.beforeUpShade.setAlpha(0f);      // show 从 0 起
-            fc.activeUpShade.setAlpha(1f);      // hide 从 1 起(延后 0.3s 才开始褪)
-
-            // 下叶片: 起始 90°(侧对观众 = 看不见), 等上半翻满后落回 0°
-            fc.activeDownLeaf.setVisibility(android.view.View.INVISIBLE);
-            fc.activeDownLeaf.setRotationX(90f);
-            fc.activeDownLeaf.setCameraDistance(camDist);
-            fc.beforeDownShade.setAlpha(0f);    // show 从 0 起
-            fc.activeDownShade.setAlpha(1f);    // hide 从 1 起
-
-            // 层序: 新值层(active)在上, 旧值层(before)在下 —— 这是起始态。
-            // 源码 z-index: li.before=3, li.active=5 → active 压着 before。
-            fc.activeUp.bringToFront();
-            fc.activeDownLeaf.bringToFront();
-            fc.seam.bringToFront();
-
-            // ---- 源码 @keyframes asd: 20% 处旧叶片夺回层级 ----
-            // 前 20%(=100ms) 新数字被旧叶片完全盖住; 100ms 后旧叶片压到最上,
-            // 它还要再转 400ms 才消失。没有这一步, 新数字会在叶片刚转开时就透出来。
-            fc.root.postDelayed(new Runnable() {
-                @Override public void run() {
-                    try {
-                        fc.beforeUpLeaf.bringToFront();
-                        fc.beforeDown.bringToFront();
-                        fc.seam.bringToFront();
-                    } catch (Throwable ignored) {}
-                }
-            }, Math.round(dur * 0.20f));
-
-            // ---- turn2: 上叶片 0 → -90, 无延迟 ----
-            android.animation.ValueAnimator upAnim = android.animation.ValueAnimator.ofFloat(0f, -90f);
-            upAnim.setDuration(dur);
-            upAnim.setInterpolator(new android.view.animation.LinearInterpolator());
-            upAnim.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
-                @Override public void onAnimationUpdate(android.animation.ValueAnimator a) {
-                    float deg = (Float) a.getAnimatedValue();
-                    try {
-                        fc.beforeUpLeaf.setRotationX(deg);
-                        // show: 0 → 1, 无延迟 —— 越翻越深, 落到中缝时最黑
-                        fc.beforeUpShade.setAlpha(Math.abs(deg) / 90f);
-                        // active 的 hide 延后 0.3s: 0.3s 前保持满, 之后线性褪到 0
-                        float t = (dur > 0) ? (a.getCurrentPlayTime() / (float) dur) : 0f;
-                        if (t > 0.6f) fc.activeUpShade.setAlpha(1f - (t - 0.6f) / 0.4f);
-                    } catch (Throwable ignored) {}
-                }
-            });
-            upAnim.addListener(new android.animation.AnimatorListenerAdapter() {
-                @Override public void onAnimationEnd(android.animation.Animator a) {
-                    try {
-                        // 停在垂直位(侧对观众, 不可见), 下一轮开始时再复位 —— 不能转回 0°,
-                        // 否则会在"后面已经静静摆着新数字"时又翻一遍。
-                        fc.beforeUpLeaf.setAlpha(0f);
-                        fc.activeUpShade.setAlpha(0f);
-                    } catch (Throwable ignored) {}
-                }
-            });
-            upAnim.start();
-
-            // ---- turn: 下叶片 90 → 0, delay 0.5s ----
-            android.animation.ValueAnimator loAnim = android.animation.ValueAnimator.ofFloat(90f, 0f);
-            loAnim.setDuration(dur);
-            loAnim.setStartDelay(dur);          // 严格接力: 上叶片翻满后才落
-            loAnim.setInterpolator(new android.view.animation.LinearInterpolator());
-            loAnim.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
-                @Override public void onAnimationUpdate(android.animation.ValueAnimator a) {
-                    float deg = (Float) a.getAnimatedValue();
-                    try {
-                        fc.activeDownLeaf.setRotationX(deg);
-                        // active 的 hide: 延后 0.3s 后 1→0
-                        float t = (dur > 0) ? (a.getCurrentPlayTime() / (float) dur) : 0f;
-                        if (t < 0.6f) fc.activeDownShade.setAlpha(1f);
-                        else fc.activeDownShade.setAlpha(1f - (t - 0.6f) / 0.4f);
-                        // before.down 的 show: 0→1(旧值的下半从亮到暗)
-                        fc.beforeDownShade.setAlpha(deg / 90f);
-                    } catch (Throwable ignored) {}
-                }
-            });
-            loAnim.addListener(new android.animation.AnimatorListenerAdapter() {
-                @Override public void onAnimationStart(android.animation.Animator a) {
-                    try { fc.activeDownLeaf.setVisibility(android.view.View.VISIBLE); } catch (Throwable ignored) {}
-                }
-                @Override public void onAnimationEnd(android.animation.Animator a) {
-                    try {
-                        fc.activeDownShade.setAlpha(0f);
-                        fc.beforeDownShade.setAlpha(1f);
-                        fc.beforeDownTv.setText(nd);   // 归一: 旧值层也换成新值, 下轮直接用
-                        fc.beforeUpTv.setText(nd);
-                    } catch (Throwable ignored) {}
-                }
-            });
-            loAnim.start();
-        } catch (Throwable ignored) {}
-    }
     private static android.view.View sHomeClockBg;
     private static android.os.Handler sHomeClockHandler;
     private static Runnable sHomeClockTick;
@@ -13068,288 +12773,6 @@ private static void showUaGroupDialog(final Context ctx) {
     private static int sOverlayReturnAnimating = 0;
 
     /** 主页时钟: 支持秒, 自定义位置大小。挂载到主页背景父容器。 */
-    /**
-     * 翻页时钟 WebView 需要多宽 —— 按源码比例算: 每个数字 60u + 左右各 5u 外边距,
-     * 每个冒号 20u。u = 卡高/90, 卡高 = fontPx/(70/90)。
-     */
-    private static float flipClockWidthPx(android.content.Context ctx, float fontPx, boolean withSeconds) {
-        float cardH = fontPx * (90f / 70f);
-        float u = cardH / 90f;
-        int digits = withSeconds ? 6 : 4;
-        int colons = withSeconds ? 2 : 1;
-        // ul: 宽 60u + margin 5u*2; divider: 宽 20u (左右无 margin)
-        //
-        // 余量必须留够: 卡片有 box-shadow:0 2px 5px(blur 5px), 需要约 2*5u 的横向空间,
-        // 否则最外侧卡片的阴影会被 WebView 边界裁掉 —— 实测右边那张卡的阴影就是被切没的。
-        // 另外之前只留 8px, 浮点误差会让 float 换行, 6 张卡被拆成两行。
-        float blur = 10f * u;
-        return digits * (60f + 10f) * u + colons * 20f * u + blur * 2f;
-    }
-
-    /**
-     * 用 WebView 承载**网站原版 FlipClock.js** —— 主页时钟的翻页样式。
-     *
-     * <p>为什么用 WebView 而不是手写 View: 网站的效果来自 CSS 3D 的一整套协作
-     * ({@code perspective} + {@code transform-origin} + {@code z-index} +
-     * {@code backface-visibility} + {@code overflow:hidden} + keyframes)。
-     * 用 Android View 逐个"翻译"这些概念时, 每一步都只能猜一个近似物:
-     * <ul>
-     *   <li>{@code perspective:200px}  → {@code setCameraDistance()} (近似)</li>
-     *   <li>{@code z-index} 动画       → {@code bringToFront()} (近似)</li>
-     *   <li>{@code overflow:hidden}    → {@code setClipChildren()} (近似)</li>
-     * </ul>
-     * 近似值叠加之后, 设备上的观感和网站就对不上了。
-     *
-     * <p>WebView 本身就是 Chromium —— 直接跑网站那份代码, 行为必然一致。
-     * 资源全部内联(不联网), 尺寸按字号换算成固定像素。
-     *
-     * @param fontPx 时钟字号(已含 sizePct), 用来定卡片尺度
-     */
-    private static android.view.View makeFlipClockWebView(android.content.Context ctx,
-                                                          float fontPx, boolean withSeconds,
-                                                          int digitColor) {
-        // 源码基准: 90px 卡高、70px 数字 → 我们的卡高 = fontPx / (70/90)
-        int cardH = Math.max(24, Math.round(fontPx * (90f / 70f)));
-        // 视口宽 = 内容宽, 高 = 卡高 + 上下各 5u 外边距。
-        //
-        // 关键: 这些值是**Android 物理像素**, 而 WebView 内部的 CSS 像素 = 物理 / dpr。
-        // 之前直接把物理像素写进 CSS, 于是内容只占视图的 1/dpr(实测 822/1041 = 79%),
-        // 屏幕上看到的就是"只有左上角一小块"。
-        float dpr = ctx.getResources().getDisplayMetrics().density;
-        if (dpr <= 0.1f) dpr = 1f;
-        int wvWpx = Math.round(flipClockWidthPx(ctx, fontPx, withSeconds));   // 物理
-        int wvHpx = cardH + Math.round(cardH / 90f * 5f) * 2;                 // 物理
-        int wvW = Math.round(wvWpx / dpr);                                    // CSS
-        int wvH = Math.round(wvHpx / dpr);                                    // CSS
-        int cardHcss = Math.round(cardH / dpr);                               // CSS
-        String fg = String.format("#%06X", 0xFFFFFF & digitColor);
-
-        String html = FLIPCLOCK_HTML
-                .replace("__CARDH__", String.valueOf(cardHcss))
-                .replace("__FG__", fg)
-                .replace("__WVW__", String.valueOf(wvW))
-                .replace("__WVH__", String.valueOf(wvH))
-                .replace("__SEC__", withSeconds ? "true" : "false");
-
-        android.webkit.WebView wv = new android.webkit.WebView(ctx);
-        wv.setTag("sbplus_home_clock");
-        // 把算好的物理尺寸挂到 tag 上。定位时若 getWidth() 还是 0(刚 add 未布局),
-        // 用它兜底 —— 否则会带着 0 去算居中, 视图落在屏幕正中且尺寸为 0(看不见)。
-        wv.setContentDescription("sbplus_clock_size:" + wvWpx + "x" + wvHpx);
-        // 2026-09-19:用 alpha=0 代替 INVISIBLE 来藏初始状态。
-        //
-        // 现象: 每次进浏览器首页, 时钟会先"卡一下变形"再恢复正常。
-        // 原因: WebView 以 INVISIBLE 建好 → loadData → 等定位完成才 VISIBLE。
-        // 而 Chromium 对 INVISIBLE 的 WebView 不做真实排版(或按退化尺寸排),
-        // 直到变 VISIBLE 才第一次真正布局 —— 那一帧的重排就是看到的变形。
-        //
-        // alpha=0 与 VISIBLE 一样参与正常布局, Chromium 会在正确尺寸下排好版,
-        // 但屏幕上看不见。定位完成后再把 alpha 拉回 1(见定位 Runnable)。
-        wv.setAlpha(0f);
-        wv.setBackgroundColor(0x00000000);
-        wv.setVerticalScrollBarEnabled(false);
-        wv.setHorizontalScrollBarEnabled(false);
-        wv.setOverScrollMode(android.view.View.OVER_SCROLL_NEVER);
-        // WebView 默认会按内容自己撑高, 在 FrameLayout/LinearLayout 里会被裁成一条。
-        // 这里写死尺寸, 并关掉滚动与"按内容测量"的行为。
-        wv.setMinimumWidth(wvW);
-        wv.setMinimumHeight(wvH);
-        wv.setScrollContainer(false);
-        wv.setFocusable(false);
-        wv.setFocusableInTouchMode(false);
-        wv.setClickable(false);
-        try {
-            android.webkit.WebSettings ws = wv.getSettings();
-            ws.setJavaScriptEnabled(true);
-            ws.setDomStorageEnabled(false);
-            ws.setAllowFileAccess(false);
-            ws.setAllowContentAccess(false);
-            ws.setBlockNetworkLoads(true);          // 资源已内联, 不联网
-            ws.setLoadsImagesAutomatically(false);
-            ws.setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
-            ws.setMediaPlaybackRequiresUserGesture(true);
-            ws.setTextZoom(100);
-            // 关键: 关掉"按窗口宽度自动缩放"和概览模式。
-            // 默认 useWideViewPort=true 会让 WebView 自己算一个 device-width 视口
-            // (实测只有 297px), 再把写死 822px 的页面缩放塞进去 → 内容被缩小 + 裁切。
-            ws.setUseWideViewPort(false);
-            ws.setLoadWithOverviewMode(false);
-            ws.setSupportZoom(false);
-            ws.setBuiltInZoomControls(false);
-        } catch (Throwable ignored) {}
-        // 透明背景, 让主页的视频/图片背景透出来
-        try {
-            wv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null);
-        } catch (Throwable ignored) {}
-
-        // 2026-09-19:建的时候就给死尺寸, 不要等到 add 之后再由定位 Runnable 设。
-        //
-        // 之前 WebView 建好后是"无 LayoutParams"状态被 addView 进去的, 父容器按
-        // WRAP_CONTENT 量它; Chromium 于是先按那个临时尺寸排了第一次版, 等定位
-        // 完成后 setLayoutParams 改尺寸, 它再重排一次 —— 这一次重排就是进浏览器时
-        // 看到的"卡一下变形"。在这里就把物理尺寸定下来, 首帧排版就是最终排版。
-        //
-        // 注意用 addRule 之外的绝对尺寸: 宽高都是已经算好的 wvWpx/wvHpx(物理像素)。
-        try {
-            android.view.ViewGroup.LayoutParams lp0 = new android.view.ViewGroup.LayoutParams(wvWpx, wvHpx);
-            if (ctx instanceof android.app.Activity) {
-                // 主页容器多为 FrameLayout; 先按 FrameLayout 给, 定位阶段会重设
-                android.widget.FrameLayout.LayoutParams fl =
-                        new android.widget.FrameLayout.LayoutParams(wvWpx, wvHpx);
-                fl.gravity = android.view.Gravity.TOP | android.view.Gravity.LEFT;
-                lp0 = fl;
-            }
-            wv.setLayoutParams(lp0);
-        } catch (Throwable ignored) {}
-
-        wv.loadDataWithBaseURL("https://flipclock.online/", html, "text/html", "UTF-8", null);
-        // 诊断: 这两条日志用来确认 WebView 真的跑起来了(之前"手机上什么都没有"
-        // 就是因为没有任何日志可看, 只能靠猜)。
-        wv.setWebViewClient(new android.webkit.WebViewClient() {
-            @Override public void onPageFinished(android.webkit.WebView view, String url) {
-                MainModule.logMsg("[SBPlus] flipclock webview page finished");
-            }
-            @Override public void onReceivedError(android.webkit.WebView view, android.webkit.WebResourceRequest req,
-                                                  android.webkit.WebResourceError err) {
-                MainModule.logMsg("[SBPlus] flipclock webview error: " + err.getDescription());
-            }
-        });
-        return wv;
-    }
-
-    /**
-     * 内联的 FlipClock 页面 —— 结构与样式全部照搬网站(含 jquery 与 flipclock 0.7.7)。
-     * 占位符: __CARDH__ 卡高(px)、__FG__ 数字色、__SEC__ 是否带秒。
-     */
-    private static final String FLIPCLOCK_HTML =
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-      // 不要写 viewport meta! 实测: 一旦声明 width=device-width, Android WebView 会把
-      // device-width 算成 297 CSS px(而视图本身有 1041px), 整页被缩到 1/3, 于是
-      // 屏幕上"只看得到一小部分"。这里所有尺寸都按真实像素写死, 不需要任何缩放。
-      + "<style>"
-      + "html,body{margin:0;padding:0;background:transparent;overflow:hidden;"
-      + "width:__WVW__px;}"                                 // 固定视口宽 = 内容宽, 否则 flex 会把内容挤出左边
-      + "#wrap{display:flex;justify-content:center;align-items:center;"
-      + "width:__WVW__px;height:__WVH__px;}"
-      + ":root{--u:calc(__CARDH__px / 90);}"
-      // 不能用 flex: 源码是 float 布局, ul(90u 高) 与 .fc-div(100u 高) 沿基线排。
-      // flex 的 align-items:center 会让两者各按自身高度居中, 中心差 5u —— 冒号就偏低。
-      + ".fc-clock{position:relative;text-align:center;white-space:nowrap;"
-      // 左右各留 10u padding: 卡片有 box-shadow blur 5px, 贴着边界会被裁掉。
-      + "padding:0 calc(var(--u)*10);"
-      + "font:normal 11px \"Helvetica Neue\",Helvetica,Arial,sans-serif;-webkit-user-select:none;}"
-      + ".fc-clock *{-webkit-box-sizing:border-box;box-sizing:border-box;"
-      + "-webkit-backface-visibility:hidden;backface-visibility:hidden;}"
-      + ".fc-clock ul{list-style:none;position:relative;float:left;margin:calc(var(--u)*5);"
-      + "width:calc(var(--u)*60);height:calc(var(--u)*90);border-radius:calc(var(--u)*6);"
-      // 源码 ul 上还有 font-size:80px 与 line-height:87px(不是 90), 之前漏掉了。
-      + "font-size:calc(var(--u)*80);line-height:calc(var(--u)*87);"
-      + "background:#000;padding:0;display:inline-block;vertical-align:middle;}"
-      + ".fc-clock ul li{z-index:1;position:absolute;left:0;top:0;width:100%;height:100%;margin:0;list-style:none;}"
-      + ".fc-clock ul li:first-child{z-index:2;}"
-      + ".fc-clock ul li a{display:block;height:100%;-webkit-perspective:calc(var(--u)*200);"
-      + "perspective:calc(var(--u)*200);margin:0;overflow:visible;}"
-      // 源码 div 上也有 font-size:80px
-      + ".fc-clock ul li a div{z-index:1;position:absolute;left:0;width:100%;height:50%;"
-      + "font-size:calc(var(--u)*80);overflow:hidden;}"
-      + ".fc-clock ul li a div .shadow{position:absolute;left:0;top:0;width:100%;height:100%;z-index:2;}"
-      + ".fc-clock ul li a div.up{-webkit-transform-origin:50% 100%;transform-origin:50% 100%;top:0;}"
-      + ".fc-clock ul li a div.up:after{content:\"\";position:absolute;left:0;z-index:5;width:100%;"
-      + "top:calc(var(--u)*44);height:calc(var(--u)*3);background-color:rgba(0,0,0,.4);}"
-      + ".fc-clock ul li a div.down{-webkit-transform-origin:50% 0;transform-origin:50% 0;bottom:0;}"
-      + ".fc-clock ul li a div div.inn{position:absolute;left:0;z-index:1;width:100%;height:200%;"
-      + "color:__FG__;background-color:#333333;text-align:center;text-shadow:0 1px 2px #000;"
-      + "border-radius:calc(var(--u)*6);font-size:calc(var(--u)*70);font-weight:bold;"
-      + "line-height:calc(var(--u)*90);font-family:\"Helvetica Neue\",Helvetica,Arial,sans-serif;}"
-      + ".fc-clock ul li a div.up div.inn{top:0;}"
-      + ".fc-clock ul li a div.down div.inn{bottom:0;}"
-      + ".fc-clock ul.play li.flip-clock-before{z-index:3;}"
-      // 源码 .flip { box-shadow:0 2px 5px rgba(0,0,0,0.7) } —— 卡片浮起感, 之前漏了
-      + ".fc-clock ul.flip{-webkit-box-shadow:0 2px 5px rgba(0,0,0,.7);"
-      + "box-shadow:0 2px 5px rgba(0,0,0,.7);}"
-      // 源码: animation:asd 0.5s 0.5s linear both —— **有 0.5s 延迟**!
-      // 之前漏了延迟, 于是新数字层在翻页一开始就抢到 z-index:4 盖住旧叶片,
-      // 透视看起来就是错的(该被遮住的时候没被遮住)。
-      + ".fc-clock ul.play li.flip-clock-active{z-index:5;"
-      + "-webkit-animation:asd 0.5s 0.5s linear both;animation:asd 0.5s 0.5s linear both;}"
-      + ".fc-clock ul.play li.flip-clock-active .down{z-index:2;"
-      + "-webkit-animation:turn 0.5s 0.5s linear both;"
-      + "animation:turn 0.5s 0.5s linear both;}"
-      + ".fc-clock ul.play li.flip-clock-before .up{z-index:2;"
-      + "-webkit-animation:turn2 0.5s linear both;"
-      + "animation:turn2 0.5s linear both;}"
-      + ".fc-clock ul li.flip-clock-active{z-index:3;}"
-      + ".fc-clock ul.play li.flip-clock-before .up .shadow{"
-      + "background:-webkit-linear-gradient(top,rgba(0,0,0,.1) 0%,#000 100%);"
-      + "background:linear-gradient(to bottom,rgba(0,0,0,.1) 0%,#000 100%);"
-      + "-webkit-animation:show 0.5s linear both;animation:show 0.5s linear both;}"
-      + ".fc-clock ul.play li.flip-clock-active .up .shadow{"
-      + "background:-webkit-linear-gradient(top,rgba(0,0,0,.1) 0%,#000 100%);"
-      + "background:linear-gradient(to bottom,rgba(0,0,0,.1) 0%,#000 100%);"
-      + "-webkit-animation:hide 0.5s 0.3s linear both;"
-      + "animation:hide 0.5s 0.3s linear both;}"
-      + ".fc-clock ul.play li.flip-clock-before .down .shadow{"
-      + "background:-webkit-linear-gradient(top,#000 0%,rgba(0,0,0,.1) 100%);"
-      + "background:linear-gradient(to bottom,#000 0%,rgba(0,0,0,.1) 100%);"
-      + "-webkit-animation:show 0.5s linear both;animation:show 0.5s linear both;}"
-      + ".fc-clock ul.play li.flip-clock-active .down .shadow{"
-      + "background:-webkit-linear-gradient(top,#000 0%,rgba(0,0,0,.1) 100%);"
-      + "background:linear-gradient(to bottom,#000 0%,rgba(0,0,0,.1) 100%);"
-      // 源码这里有个已知笔误: animation:hide 0.5s 0.2s (不是 0.3s)。
-      // 照抄, 保持和网站完全一致。
-      + "-webkit-animation:hide 0.5s 0.2s linear both;"
-      + "animation:hide 0.5s 0.2s linear both;}"
-      + "@-webkit-keyframes turn{0%{-webkit-transform:rotateX(90deg)}100%{-webkit-transform:rotateX(0deg)}}"
-      + "@keyframes turn{0%{transform:rotateX(90deg)}100%{transform:rotateX(0deg)}}"
-      + "@-webkit-keyframes turn2{0%{-webkit-transform:rotateX(0deg)}100%{-webkit-transform:rotateX(-90deg)}}"
-      + "@keyframes turn2{0%{transform:rotateX(0deg)}100%{transform:rotateX(-90deg)}}"
-      + "@-webkit-keyframes asd{0%{z-index:2}20%{z-index:4}100%{z-index:4}}"
-      + "@keyframes asd{0%{z-index:2}20%{z-index:4}100%{z-index:4}}"
-      + "@-webkit-keyframes show{0%{opacity:0}100%{opacity:1}}"
-      + "@keyframes show{0%{opacity:0}100%{opacity:1}}"
-      + "@-webkit-keyframes hide{0%{opacity:1}100%{opacity:0}}"
-      + "@keyframes hide{0%{opacity:1}100%{opacity:0}}"
-      // 源码是 float 布局(ul 与 .flip-clock-divider 都 float:left), 沿同一基线排。
-      // 之前用 flex + align-items:center 把两者按各自主高居中, 而 divider 高 100u、
-      // 卡片高 90u —— 中心差 5u, 冒号就整体偏低 7px。改回 float 才和网站一致。
-      + ".fc-clock{zoom:1;}"
-      + ".fc-clock:after{content:\" \";display:table;clear:both;}"
-      + ".fc-div{float:left;display:inline-block;position:relative;"
-      + "width:calc(var(--u)*20);height:calc(var(--u)*100);"
-      // 关键: divider 比卡片高 10u, 用负 margin 把它的**中心**对到卡片中心
-      + "margin:calc(var(--u)*5) 0;}"
-      + ".fc-dot{display:block;background:#323434;width:calc(var(--u)*10);height:calc(var(--u)*10);"
-      + "position:absolute;border-radius:50%;-webkit-box-shadow:0 0 5px rgba(0,0,0,.5);"
-      + "box-shadow:0 0 5px rgba(0,0,0,.5);left:calc(var(--u)*5);}"
-      + ".fc-dot.top{top:calc(var(--u)*30);}"       // 源码: top:30px
-      + ".fc-dot.bottom{bottom:calc(var(--u)*30);}"  // 源码: bottom:30px
-      + "</style></head><body><div id=\"wrap\"><div class=\"fc-clock\" id=\"fc\"></div></div>"
-      + "<script>"
-      + "(function(){"
-      + "var WITHSEC=__SEC__;"
-      + "function item(cls,val){return '<li class=\"'+(cls||'')+'\"><a href=\"#\">'"
-      + "+'<div class=\"up\"><div class=\"shadow\"></div><div class=\"inn\">'+(val||'')+'</div></div>'"
-      + "+'<div class=\"down\"><div class=\"shadow\"></div><div class=\"inn\">'+(val||'')+'</div></div>'"
-      + "+'</a></li>';}"
-      + "function cell(prev,cur,play){return '<ul class=\"flip'+(play?' play':'')+'\">'"
-      + "+item('flip-clock-before',prev)+item('flip-clock-active',cur)+'</ul>';}"
-      + "function d1(n){return String(n);}"    // 单张卡只放一个字符, 不能再补零
-      + "var cur=[],prev=[];"
-      + "function read(){var d=new Date();var a=[d1(d.getHours()/10|0),d1(d.getHours()%10),':'"
-      + ",d1(d.getMinutes()/10|0),d1(d.getMinutes()%10)];"
-      + "if(WITHSEC){a.push(':');a.push(d1(d.getSeconds()/10|0));a.push(d1(d.getSeconds()%10));}return a;}"
-      + "function render(playset){var s='';for(var i=0;i<cur.length;i++){"
-      + "if(cur[i]===':'){s+='<div class=\"fc-div\"><i class=\"fc-dot top\"></i>"
-      + "<i class=\"fc-dot bottom\"></i></div>';continue;}"
-      + "s+=cell(prev[i],cur[i],playset&&playset.indexOf(i)>=0);}"
-      + "document.getElementById('fc').innerHTML=s;}"
-      + "function tick(){prev=cur.slice();var n=read();var ch=[];"
-      + "for(var i=0;i<n.length;i++){if(n[i]!==cur[i]&&n[i]!==':')ch.push(i);}"
-      + "cur=n;render(null);void document.body.offsetWidth;render(ch);}"
-      + "cur=read();prev=cur.slice();render(null);"
-      + "setInterval(tick,1000);"
-      + "})();"
-      + "</script></body></html>";
 
     private static void attachHomeClock(Object bgViewObj) {
         if (VERBOSE_LAYOUT_LOG) MainModule.logMsg("[SBPlus][LAYOUT] attachHomeClock ENTER, bg=" + bgViewObj);
@@ -13372,6 +12795,41 @@ private static void showUaGroupDialog(final Context ctx) {
             // 并重新起一个 postDelayed 定位重试,多个定位循环互相打断就是「跳动」。
             final String csig = homeClockSignature(bg.getContext());
             if (sHomeClockTv != null && sHomeClockTv.getParent() == parent && csig.equals(sHomeClockSig)) {
+                // 2026-10-09 适配 31.0.0.64：此处**三次尝试自愈均导致宿主闪退**，已全部回滚。
+                // 保持原样的幂等短路。
+                //
+                // ⚠️ 以下记录属于 **WebView 实现时期**。2026-10-09 翻页时钟已改为纯 Canvas
+                // 自绘（com.sbplus.browser.widget.FlipClockView），时钟内部不再有 Chromium，
+                // "在重建期对它做任何写入都触发渲染进程断言"这一崩溃模式随之消失；
+                // 保留这段记录仅供日后查证历史，不要再据此推断新实现的行为。
+                //
+                // 现象：从网页返回主页后时钟偶发不显示。根因已确认 —— 时钟建好后靠
+                // clockView.post(定位回调) 完成定位并置 VISIBLE/alpha=1，而该回调在视图尚未
+                // attach 时只进待执行队列，主页视图重建后可能再不被调度。真机日志实证：
+                // clock REBUILD 有、home clock attached 有，但 clock pos done 一次都没有，
+                // 时钟永远停在 alpha=0；而后续补挂点走到本分支又被短路，再无机会重新定位。
+                //
+                // 三次失败的修法（均复现崩溃，勿再尝试）：
+                //   ① 把定位回调改挂 sHomeClockHandler.post（失去"视图已 attach"前提，
+                //      未 attach 的 WebView 被 measure() 触发 Chromium 断言）；
+                //   ② 同样改 Handler 并加 isAttachedToWindow() 守卫重试；
+                //   ③ 在本短路分支里"不可见就 removeView + 重建"。
+                // 崩溃特征：sandboxed_process0 / CrRendererMain / libterrace.so /
+                // Abort message 'Build fingerprint:'，主进程每 ~4 秒以 fg TOP 死亡一次。
+                //
+                // 结论：该时钟（WebView 实现）与 View 系统的 attach/layout 时序强耦合，
+                // 任何在这条路径上的自愈改动都会破坏前提。要修必须换思路（例如彻底避开
+                // WebView、改用纯 TextView 绘制翻页样式），而不是在现有回调链上打补丁。
+                // 2026-10-09 第四次尝试**也已回滚**：在短路分支里补 `setAlpha(1f)`。
+                // 推理是"纯属性写入、不触发布局所以安全"，但真机实测仍复现闪退。
+                // 至此四次尝试全部失败（改 Handler / Handler+attach 守卫 / removeView 重建 /
+                // 仅恢复 alpha），结论修正为：**不只是布局时序问题，只要在这条时钟回调链上
+                // 增加任何写入，都会触发宿主渲染进程崩溃**。
+                // 崩溃特征：sandboxed_process0 / CrRendererMain / libterrace.so /
+                // Abort message 'Build fingerprint:'。
+                //
+                // 要修必须彻底绕开现有实现（例如放弃 WebView、用纯 TextView 重画翻页样式），
+                // 不要在 attachHomeClock 的短路分支里做任何自愈。
                 if (VERBOSE_LAYOUT_LOG) MainModule.logMsg("[SBPlus][LAYOUT] clock EXIT: idempotent short-circuit (reused, NOT repositioned)"
                         + " parentW=" + parent.getWidth() + " parentH=" + parent.getHeight());
                 return;
@@ -13393,29 +12851,60 @@ private static void showUaGroupDialog(final Context ctx) {
             } catch (Throwable ignored) {}
 
             int sizePct = HomeClockHelper.getSizePct(bg.getContext());
-            float baseFont = bg.getContext().getResources().getDisplayMetrics().widthPixels * 0.11f;
-            final float fontPx = baseFont * sizePct / 100f;
             final boolean flipStyle = HomeClockHelper.getClockStyle(bg.getContext()) == 1;
+            // 2026-10-13：翻页样式单独用一档基准系数（0.095），普通文字样式保持 0.11。
+            //
+            // 为什么不能共用 0.11：普通文字是一行字符串，0.11 在屏宽上刚好；
+            // 而翻页样式是 6 张卡片（HH:MM:SS）横向排列，卡宽 = 字号 × (90/70) × (60/90)，
+            // 同一个 0.11 会让整体宽度吃到屏宽的四分之三 —— 真机实测
+            // FlipClockView 视图 1073×235px（屏宽 1440），占 74.5%，观感上"占满"了主页。
+            //
+            // 0.085（2026-10-12 首版）收到约 57%，真机看后用户觉得偏小；
+            // 0.095 是折中：约占屏宽 64%（sizePct=100 时），比 0.11 明显收窄、又比 0.085 有分量。
+            //
+            // 这是**有意偏离**普通文字那档，不是笔误：两者排版模型不同（一行字 vs 六张卡）。
+            // 用户仍可在「位置与大小」里用百分比放大/缩小 —— 注意那个百分比是**乘数**，
+            // 会叠在这个基准之上（例如滑块 110% 时，实际生效的是 0.095 × 1.1）。
+            final float fontBaseRatio = flipStyle ? 0.095f : 0.11f;
+            float baseFont = bg.getContext().getResources().getDisplayMetrics().widthPixels
+                    * fontBaseRatio;
+            final float fontPx = baseFont * sizePct / 100f;
             final android.view.View clockView;
             if (flipStyle) {
-                // 翻页卡片样式: 直接在 WebView 里跑**网站原版 FlipClock.js**。
+                // 翻页卡片样式: 纯 Canvas 自绘的 FlipClockView(com.sbplus.browser.widget)。
                 //
-                // 为什么不手写 View: CSS 3D 是浏览器引擎的一整套行为(perspective /
-                // transform-origin / z-index / backface-visibility / overflow:hidden
-                // 互相配合)。用 Android View 去"模仿"它, 每一步都是猜等价物
-                // (setCameraDistance 猜 perspective、bringToFront 猜 z-index、
-                // setClipChildren 猜 overflow), 累积起来必然走样。
-                //
-                // WebView 就是 Chromium —— 跑的是网站那份一模一样的代码, 效果必然一致。
+                // 历史(为什么不再用 WebView / 浏览器内核, 详见 FlipClockView 类注释):
+                //   ① android.webkit.WebView —— 真机 V8 版本冲突(浏览器内核 libterrace.so
+                //      自带 V8 14.8 vs 系统 WebView snapshot 15.0) → 渲染进程 abort → 宿主闪退;
+                //   ② 浏览器自带内核(Terrace/TinContentView) —— 不崩溃, 但 ContentView 在
+                //      tab 生命周期之外拿不到 compositor 窗口注册, 一帧都不画;
+                //   ③ View 树翻译版(内部类 FlipCard) —— 每位数字要建十几个子 View, 对宿主
+                //      视图树侵入大, 且已无调用者。
+                // 现在: 单 View Canvas 自绘, 不新增任何子 View, 也不碰 Chromium。
+                final com.sbplus.browser.widget.FlipClockView fcv =
+                        new com.sbplus.browser.widget.FlipClockView(bg.getContext());
+                fcv.setTag("sbplus_home_clock");
+                // 同 Logo / 普通文字: 定位完成前不显示, 避免默认位置先画一帧再跳。
+                fcv.setVisibility(android.view.View.INVISIBLE);
+                fcv.setDigitSizePx(fontPx);
+                fcv.setShowSeconds(HomeClockHelper.isSeconds(bg.getContext()));
+                fcv.setHour24(HomeClockHelper.is24Hour(bg.getContext()));
+                fcv.setFontFamily(HomeClockHelper.getFontFamily(bg.getContext()));
+                // "跟随自定义字体"：用 FontHelper 里用户选中的字体文件。
+                // 已缓存就直接用；没缓存则后台加载，加载完由 ensureFontLoadedAsync()
+                // 的主线程回调补设（见那里的 sHomeClockTv 分支）——不阻塞主页首帧。
+                if (HomeClockHelper.CUSTOM_FONT.equals(HomeClockHelper.getFontFamily(bg.getContext()))) {
+                    if (sFontTypeface != null) fcv.setCustomTypeface(sFontTypeface);
+                    else ensureFontLoadedAsync();
+                }
                 int digitColor0 = clockTextColor(bg.getContext());
-                if (digitColor0 == sHomeClockCharColor) digitColor0 = 0xFFCCCCCC;
-                sHomeClockFlipCards = null;
-                clockView = makeFlipClockWebView(bg.getContext(), fontPx,
-                        HomeClockHelper.isSeconds(bg.getContext()), digitColor0);
-                sHomeClockFlipLast = "";
+                // 未设主题色时用纯白（站点原版 #ccc，按用户要求改白）
+                if (digitColor0 == sHomeClockCharColor) digitColor0 = 0xFFFFFFFF;
+                fcv.setDigitColor(digitColor0);
+                fcv.setColonColor(digitColor0);
+                fcv.start();
+                clockView = fcv;
             } else {
-                sHomeClockFlipCards = null;
-                sHomeClockFlipLast = "";
                 final android.widget.TextView tv = new android.widget.TextView(bg.getContext());
                 tv.setTag("sbplus_home_clock");
                 // 同 Logo:定位完成前不显示,避免默认位置先画一帧再跳。
@@ -13467,17 +12956,10 @@ private static void showUaGroupDialog(final Context ctx) {
                 sHomeClockDateTv = null;
             }
 
-            // 普通文字用 WRAP_CONTENT 自适应; WebView 必须给确定宽高, 否则测量成 0 不可见。
-            if (clockView instanceof android.webkit.WebView) {
-                // 视图尺寸用**物理像素**(和上面 CSS 尺寸 = 物理/dpr 配对)
-                int wvW = Math.round(flipClockWidthPx(bg.getContext(), fontPx,
-                        HomeClockHelper.isSeconds(bg.getContext())));
-                int cardH = Math.max(24, Math.round(fontPx * (90f / 70f)));
-                int wvH = cardH + Math.round(cardH / 90f * 5f) * 2;
-                parent.addView(clockView, makeLp(parent, wvW, wvH));
-            } else {
-                parent.addView(clockView, makeLp(parent, -2, -2));
-            }
+            // FlipClockView 的 onMeasure 按 u 精确算出内容尺寸(HH:MM:SS), 与普通文字一样
+            // 用 WRAP_CONTENT 加进去即可 —— 不再需要"WebView / 内核 ContentView 必须给确定
+            // 宽高"那一类特殊处理(它们要么铺满父容器盖住主页, 要么按退化尺寸排版)。
+            parent.addView(clockView, makeLp(parent, -2, -2));
             sHomeClockTv = clockView;
 
             sHomeClockTick = new Runnable() {
@@ -13489,20 +12971,10 @@ private static void showUaGroupDialog(final Context ctx) {
                         String t = secs
                                 ? String.format("%02d:%02d:%02d", now.getHours(), now.getMinutes(), now.getSeconds())
                                 : String.format("%02d:%02d", now.getHours(), now.getMinutes());
-                        if (sHomeClockFlipCards != null) {
-                            // 翻页卡片: 逐位比对, 只有变化的位播翻页动画
-                            String digitsOnly = t.replace(":", "");
-                            if (!digitsOnly.equals(sHomeClockFlipLast) && digitsOnly.length() == sHomeClockFlipCards.length) {
-                                for (int ci = 0; ci < sHomeClockFlipCards.length; ci++) {
-                                    flipCardTo(sHomeClockFlipCards[ci], String.valueOf(digitsOnly.charAt(ci)));
-                                }
-                                sHomeClockFlipLast = digitsOnly;
-                            }
-                        } else if (sHomeClockTv instanceof android.widget.TextView) {
-                            // 普通文字样式才由这里驱动。
-                            // 翻页样式是 WebView, 它自己用 setInterval 走时 —— 绝不能强转,
-                            // 否则每 200ms 抛一次 ClassCastException(被外层 catch 吞掉),
-                            // 时钟就再也不更新了。
+                        if (sHomeClockTv instanceof android.widget.TextView) {
+                            // 只有普通文字样式由这里驱动。
+                            // 翻页样式(FlipClockView)自己走时 —— 绝不能强转, 否则每 200ms
+                            // 抛一次 ClassCastException(被外层 catch 吞掉), 时钟就再也不更新。
                             android.widget.TextView tt = (android.widget.TextView) sHomeClockTv;
                             if (!t.equals(tt.getText().toString())) tt.setText(t);
                         }
@@ -13547,6 +13019,20 @@ private static void showUaGroupDialog(final Context ctx) {
             sHomeClockHandler.post(sHomeClockTick);
 
             // 布局完成后精确定位(百分比锚点中心); 若父视图尚未布局, 延迟重试直到就绪
+            //
+            // 2026-10-09 结论（31.0.0.64 适配期间两次实测，勿再尝试）：
+            // 「从网页返回主页后时钟偶发不显示」的成因是本行 clockView.post —— 视图未 attach
+            // 时回调被压入待执行队列，主页视图重建后可能再不被调度（真机日志：clock REBUILD
+            // 与 home clock attached 都有，但 clock pos done 一次都没有，时钟停在 alpha=0）。
+            // 但**两种改法都让宿主闪退**，均已回滚：
+            //   ① 直接改 sHomeClockHandler.post → WebView 未 attach 时执行到 measure()/
+            //      setLayoutParams()，触发 Chromium 断言（sandboxed_process0 / CrRendererMain /
+            //      libterrace.so，Abort message 'Build fingerprint:'），主进程每 ~4 秒死一次；
+            //   ② 改 Handler 并加 isAttachedToWindow() 守卫 → 仍复现同样崩溃。
+            // 即：该回调与 View 系统的 attach/layout 时序强耦合，换成 Handler 调度就破坏了这个
+            // 前提。要修必须在**别的触发点**补挂时钟（例如已有的
+            // QuickAccessMainLayout.onAttachedToWindow hook 路径），而不是改这里的 post 机制。
+            // 保持原实现：时钟偶发不显示，好过宿主闪退。
             clockView.post(new Runnable() {
                 final int[] retry = { 0 };
                 @Override public void run() {
@@ -13633,10 +13119,7 @@ private static void showUaGroupDialog(final Context ctx) {
                         clockView.setLayoutParams(lp2);
                         // 定位完成后显示。
                         //
-                        // 2026-09-19:配合 makeFlipClockWebView 里改用 alpha=0 的改动 ——
-                        // 那里让 WebView 一直保持"参与正常排版"的状态(而不是 INVISIBLE),
-                        // 这样 Chromium 在正确尺寸下就把版排好了, 不会在显示的那一帧才重排。
-                        // 这里只要把 alpha 拉回 1 就干净地出现, 不再有"卡一下变形"。
+                        // 定位完成后显示(时钟建出来时是 INVISIBLE, 避免默认位置先闪一帧)。
                         //
                         // 仍然 post 一帧: 让 View 系统先完成 measure/layout 再显示,
                         // 避免用旧位置闪一帧。
@@ -13712,7 +13195,7 @@ private static void showUaGroupDialog(final Context ctx) {
 
     /** 刷新主页时钟(设置变更后重挂载)。 */
     /** 重建去抖: 一次设置变更会连着触发 refreshHomeClock 多次(实测 3 次),
-     *  每次都造一个新的 WebView —— 最后留下的那个可能还没布局(size=0x0)。
+     *  每次都造一个新的时钟 View —— 最后留下的那个可能还没布局(size=0x0)。
      *  合并成一次, 在下一帧统一执行。 */
     private static Runnable sClockRefreshPending = null;
     private static android.os.Handler sClockRefreshHandler = null;
@@ -22285,18 +21768,30 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                 // 的方式,而不能仅凭 action 名放行。
                 return false;
             }
+            boolean pkgOk = false;
             for (String allowed : TRUSTED_BROADCAST_PACKAGES) {
-                if (allowed.equals(pkg)) return true;
+                if (allowed.equals(pkg)) { pkgOk = true; break; }
             }
-            android.content.pm.PackageManager pm =
-                    sAppContext != null ? sAppContext.getPackageManager() : null;
-            if (pm != null) {
-                String[] own = pm.getPackagesForUid(android.os.Process.myUid());
-                if (own != null) {
-                    for (String p : own) if (p.equals(pkg)) return true;
+            if (!pkgOk) {
+                android.content.pm.PackageManager pm =
+                        sAppContext != null ? sAppContext.getPackageManager() : null;
+                if (pm != null) {
+                    String[] own = pm.getPackagesForUid(android.os.Process.myUid());
+                    if (own != null) {
+                        for (String p : own) if (p.equals(pkg)) { pkgOk = true; break; }
+                    }
                 }
             }
-            return false;
+            if (!pkgOk) return false;
+            // 2026-10-11 修复(审查 P1):package 是**发送方可任意填写的字段**,不能单独
+            // 作为来源证明 —— 任何应用 setPackage(宿主包名) 后都能触发这些动作。而下载
+            // 列表的暂停/继续按钮原先又不带 package,被本门禁整体误杀(按钮失效)。现在
+            // 所有内部发送方(SbDownloadManager.sendCtrl 与通知动作 PendingIntent)一律
+            // 携带本进程随机令牌,这里逐字核对;第三方无从获取。旧版本遗留的通知没有
+            // 令牌,点击只会被忽略(重新点开下载列表即可),属预期。
+            String tok = i.getStringExtra(
+                    com.sbplus.browser.SbDownloadManager.EXTRA_CTRL_TOKEN);
+            return tok != null && tok.equals(com.sbplus.browser.SbDownloadManager.ctrlToken());
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] isTrustedDownloadBroadcast error: " + t);
             return false;      // 校验本身失败时保守拒绝
@@ -22320,10 +21815,9 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                         // 广播由 system_server 代发),因此任何第三方应用都能构造同样
                         // action 的 Intent。其中 ACTION_CANCEL_DL 会走 cleanupTaskFile
                         // **删除用户存储上的文件**,属于可被外部触发的破坏性操作。
-                        // 这里只接受两类来源:
-                        //   ① 系统代发的通知动作 —— Intent 中带本模块自己写入的
-                        //      "sbplus_token" 校验串(见通知构建处),外部无法猜测;
-                        //   ② 本应用自身(同包名)发出的 Intent。
+                        // 判据(2026-10-11 修复 P1):package 白名单 + 进程级随机令牌,
+                        // 两者缺一不可 —— package 是发送方可随意填写的字段,令牌才是
+                        // 真正的来源证明(由 SbDownloadManager.sendCtrl / 通知动作携带)。
                         // 校验不通过则直接忽略,不做任何动作。
                         if (!isTrustedDownloadBroadcast(i)) {
                             MainModule.logMsg("[SBPlus] ignored untrusted broadcast: " + action
@@ -22334,7 +21828,22 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                             showDownloadList();
                         } else if (action.equals("com.sbplus.browser.ACTION_CANCEL_DL")) {
                             String id = i.getStringExtra("task_id");
-                            if (id != null) com.sbplus.browser.SbDownloadManager.cancel(sAppContext, id);
+                            if (id != null) {
+                                // 2026-10-11(F1):暂停中的任务没有活动下载线程,不会像下载中
+                                // 任务那样由 worker 自行收尾。先记下暂停态、再标记取消,之后按
+                                // 「取消」语义清理分片/产物并移出列表(cleanupTaskFile 的既有行为)。
+                                boolean wasPaused = com.sbplus.browser.SbDownloadManager.isPaused(id);
+                                com.sbplus.browser.SbDownloadManager.cancel(sAppContext, id);
+                                if (wasPaused) {
+                                    // 清理会删分片文件(磁盘 IO),不能占着接收器的主线程 —— 丢给后台池。
+                                    final String fid = id;
+                                    SbExecutors.bg(new Runnable() {
+                                        @Override public void run() {
+                                            cleanupTaskFile(com.sbplus.browser.SbDownloadManager.get(fid));
+                                        }
+                                    });
+                                }
+                            }
                         } else if (action.equals("com.sbplus.browser.ACTION_PAUSE_DL")) {
                             String id = i.getStringExtra("task_id");
                             if (id != null) com.sbplus.browser.SbDownloadManager.pause(id);
@@ -22672,13 +22181,14 @@ private static final String SNIFF_JS = "(function(){try{return (function(){var W
                         @Override public void onClick(android.view.View v) {
                             try {
                                 if (com.sbplus.browser.SbDownloadManager.isPaused(fid)) {
-                                    android.content.Intent ri = new android.content.Intent("com.sbplus.browser.ACTION_RESUME_DL");
-                                    ri.putExtra("task_id", fid);
-                                    sAppContext.sendBroadcast(ri);
+                                    // 2026-10-11 修复(P1/F1):改走统一发送入口 —— 限定包名
+                                    // 并携带令牌,否则接收端的来源校验会把它拒掉(原实现在
+                                    // 这里发的是裸隐式广播,暂停/继续按钮实际从未生效)。
+                                    com.sbplus.browser.SbDownloadManager.sendCtrl(sAppContext,
+                                            "com.sbplus.browser.ACTION_RESUME_DL", fid);
                                 } else {
-                                    android.content.Intent pi = new android.content.Intent("com.sbplus.browser.ACTION_PAUSE_DL");
-                                    pi.putExtra("task_id", fid);
-                                    sAppContext.sendBroadcast(pi);
+                                    com.sbplus.browser.SbDownloadManager.sendCtrl(sAppContext,
+                                            "com.sbplus.browser.ACTION_PAUSE_DL", fid);
                                     toastShort(T("已暂停,已下载分片保留", "Paused, parts kept"));
                                 }
                                 refreshListIn(act, root, list, h, selectedSet, bAll, bDel, dlgRef);
@@ -26442,7 +25952,13 @@ private static boolean showMediaDialog(String json) {
                 String rk = registrableDomain(k), rh = registrableDomain(h);
                 if (rk != null && !rk.isEmpty() && rk.equals(rh)) return true;
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            // 2026-10-09 审核 M3：本条是**安全判定**（决定是否把嗅探页的 Cookie 注入目标请求）。
+            // 失败方向本身是保守的（返回 false = 不注入，不会把 A 站凭据发给 B 站），
+            // 但按 _AUDIT.md 约定「改变了功能判定结果的必须记日志」—— 静默失败会表现为
+            // "某些 CDN 资源莫名 403"（TikTok 那类强制校验 cookie 的场景），无从排查。
+            warnPrefOnce("hostMatchesSniffCookie", String.valueOf(t));
+        }
         return false;
     }
 

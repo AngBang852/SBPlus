@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      翻页时钟（FlipClockView）自定义属性。
+
+      ⚠️ 重要：本模块是 LSPosed 模块，FlipClockView 的实际运行环境是**三星浏览器进程**
+      （模块代码被注入宿主）。宿主进程里加载不到模块自己的 R 类与资源表，因此
+      FlipClockView **不会**使用 R.styleable 解析 XML 属性，而是按属性名逐条匹配
+      （见 FlipClockView#readAttributeSet）。这份 attrs.xml 的作用是：
+        1) 在模块自身的 Activity 布局里可以正常书写这些属性（IDE 补全 / lint 校验）；
+        2) 作为本组件可配置项的权威清单与文档。
+
+      宿主侧（主页时钟）走的是代码注入路径，全部通过 setter 配置。
+
+      属性名一律以 fc 前缀（flip clock），避免与宿主资源冲突。
+    -->
+    <declare-styleable name="FlipClockView">
+
+        <!-- 数字字号（决定卡片整体尺度：卡高 = 字号 × 90/70）。默认 40dp。 -->
+        <attr name="fcDigitSize" format="dimension" />
+
+        <!-- 数字颜色。默认 #FFFFFF 纯白（站点原版是 #ccc）。 -->
+        <attr name="fcDigitColor" format="color" />
+
+        <!-- 数字所在色块的颜色。默认 #333333（站点 .inn { background-color:#333 }）。 -->
+        <attr name="fcCardColor" format="color" />
+
+        <!-- 卡片最底层色块颜色。默认 #000000（站点 ul { background:#000 }）。 -->
+        <attr name="fcCardBackColor" format="color" />
+
+        <!-- 中缝分隔线颜色。默认 #66000000（站点 .up:after { background:rgba(0,0,0,.4) }）。 -->
+        <attr name="fcSeamColor" format="color" />
+
+        <!-- 冒号颜色。不设置时跟随数字颜色。 -->
+        <attr name="fcColonColor" format="color" />
+
+        <!-- 卡片圆角。不设置时按站点比例 6/90 × 卡高 自动推导。 -->
+        <attr name="fcCornerRadius" format="dimension" />
+
+        <!-- 单阶段翻页时长（毫秒）。默认 500（站点 0.5s）；一轮完整翻页 = 该值 × 2。 -->
+        <attr name="fcFlipDuration" format="integer" />
+
+        <!-- 是否显示秒。默认 true。 -->
+        <attr name="fcShowSeconds" format="boolean" />
+
+        <!-- 是否 24 小时制。默认 true；false 时按 12 小时制显示（不显示 AM/PM）。 -->
+        <attr name="fcHour24" format="boolean" />
+
+        <!-- 数字是否加粗。默认 true（站点 ul { font-weight:bold }）。 -->
+        <attr name="fcDigitBold" format="boolean" />
+
+        <!-- 字体。默认 asset:ArialEnUnicodeBold.ttf（Arial 血统的打包字体，跨设备一致）；
+             也接受 sans-serif / monospace 这类 Android 字体族名，或 custom:（跟随自定义字体）。
+             打包字体见 assets/fonts/，已用 fontTools 子集化到只含 0-9 与冒号。
+             2026-10-13 清理后该目录只保留 ArialEnUnicodeBold.ttf，兜底一律走系统字体。 -->
+        <attr name="fcFontFamily" format="string" />
+
+        <!-- 初始是否处于倒计时模式。默认 false。 -->
+        <attr name="fcCountDown" format="boolean" />
+
+    </declare-styleable>
+
+</resources>
