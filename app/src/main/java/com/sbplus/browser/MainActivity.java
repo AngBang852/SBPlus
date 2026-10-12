@@ -109,11 +109,26 @@ public class MainActivity extends Activity {
                     mStatusDetailView.setText(sb.toString());
                     break;
                 }
+                case SERVICE_UNAVAILABLE: {
+                    // 2026-10-13 新增：把「确实没激活」与「框架不提供状态服务」分开。
+                    // 免 root 框架（NPatch / LSPatch）是单应用注入，不在 system_server 注册
+                    // 全局 XposedService，模块侧读不到激活状态 —— 原先这里直接断言"未激活"，
+                    // 在那些框架下是错的（模块其实跑得好好的）。
+                    mStatusDot.setBackgroundResource(R.drawable.dot_warn);
+                    mStatusView.setText("无法读取框架状态");
+                    mStatusDetailView.setText(
+                            "未检测到框架状态服务。两种可能：\n"
+                                    + "① 模块未启用 —— 请确认已在 LSPosed 中启用本模块、"
+                                    + "作用域勾选「三星浏览器」，然后重启浏览器；\n"
+                                    + "② 你用的是免 root 框架（NPatch / LSPatch 等）—— 它们不做全局"
+                                    + "注入、不提供状态服务，此提示可忽略，请以功能是否生效为准。");
+                    break;
+                }
                 default: {
                     mStatusDot.setBackgroundResource(R.drawable.dot_err);
                     mStatusView.setText("未激活");
                     mStatusDetailView.setText(
-                            "未检测到框架服务。请确认：\n"
+                            "框架服务曾连接过、现已断开。请确认：\n"
                                     + "① 已在 LSPosed 中启用本模块；\n"
                                     + "② 作用域已勾选「三星浏览器」；\n"
                                     + "③ 已重启三星浏览器。");

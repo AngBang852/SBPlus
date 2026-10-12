@@ -39,6 +39,24 @@ final class ModuleStatus {
 
     /** 模块在框架中的激活状态。 */
     enum State {
+        /**
+         * 无法读取框架状态（2026-10-13 新增）。
+         *
+         * <p><b>为什么需要它</b>：免 root 框架（NPatch / LSPatch 等）是**单应用注入**，
+         * 不在 {@code system_server} 注册全局 {@code XposedService} —— NPatch 官方 FAQ
+         * 原文：「框架提供的是单应用注入环境，不是在 system_server 注册的全局
+         * XposedService，也不会做 Zygote 全局注入。依赖全局 Binder 服务、系统作用域或
+         * system_server hook 的模块仍不兼容。」
+         *
+         * <p>此时 {@link XposedServiceHelper} 永远不会回调，{@code sService} 恒为 null。
+         * 若仍按 {@link #NOT_ACTIVE} 处理，模块首页会**误报"未激活"** —— 而模块其实
+         * 好好地在浏览器里跑着。本状态把这个歧义如实表达出来。
+         *
+         * <p>判定见 {@link #getState()}：<b>从未</b>绑定过服务、且距 {@link #init} 已过
+         * {@link #SERVICE_WAIT_MS} 才归入本状态；曾绑定过又断开则仍是
+         * {@link #NOT_ACTIVE}（那才是真的掉了）。
+         */
+        SERVICE_UNAVAILABLE,
         /** 未激活：拿不到 XposedService。 */
         NOT_ACTIVE,
         /** 已激活但作用域未包含三星浏览器。 */
@@ -58,6 +76,29 @@ final class ModuleStatus {
 
     private static volatile XposedService sService;
     private static volatile boolean sListenerRegistered;
+
+    /**
+     * 框架服务是否**曾经**绑定过（2026-10-13 新增）。
+     *
+     * <p>用途：区分两种"现在没有服务"——
+     * <ul>
+     *   <li>曾经连上过、现在断开 → 框架是支持的，只是模块被关了/框架重启了 → {@link State#NOT_ACTIVE}</li>
+     *   <li>从未连上过 → 无法区分"模块未启用"与"框架根本不提供状态服务"（NPatch 等）
+     *       → 过了 {@link #SERVICE_WAIT_MS} 后归入 {@link State#SERVICE_UNAVAILABLE}</li>
+     * </ul>
+     */
+    private static volatile boolean sServiceEverBound;
+
+    /** {@link #init} 被调用的时刻（uptimeMillis）；0 表示尚未初始化。 */
+    private static volatile long sInitAt;
+
+    /**
+     * 等待框架绑定服务的窗口（毫秒）。
+     *
+     * <p>取 3 秒：LSPosed 绑定 service 是进程内 Binder，正常在几百毫秒内完成；
+     * 超过这个窗口还没回调，基本可以断定框架不提供该服务。
+     */
+    private static final long SERVICE_WAIT_MS = 3000L;
 
     /** 已注册监听器的回调（界面可注册，服务绑定/解绑时收到通知）。 */
     public interface Listener {
@@ -91,6 +132,7 @@ final class ModuleStatus {
                 @Override
                 public void onServiceBind(XposedService service) {
                     sService = service;
+                    sServiceEverBound = true;
                     log("ModuleStatus: service bound, framework=" + getFrameworkName());
                     notifyChanged();
                 }
@@ -103,6 +145,15 @@ final class ModuleStatus {
                 }
             });
             sListenerRegistered = true;
+            sInitAt = android.os.SystemClock.uptimeMillis();
+            // 等待窗口结束后主动通知一次：若届时仍没绑定服务，getState() 会从
+            // NOT_ACTIVE 变为 SERVICE_UNAVAILABLE，界面需要跟着刷新。
+            try {
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                        new Runnable() {
+                            @Override public void run() { notifyChanged(); }
+                        }, SERVICE_WAIT_MS + 300L);
+            } catch (Throwable ignored) {}
         } catch (Throwable t) {
             // 未装框架 / 框架不提供 service 时会走到这里 —— 属正常情况，
             // 不抛异常（界面会据此显示"未激活"）。
@@ -127,7 +178,16 @@ final class ModuleStatus {
     /** 当前状态。 */
     static State getState() {
         XposedService svc = sService;
-        if (svc == null) return State.NOT_ACTIVE;
+        if (svc == null) {
+            // 从未绑定过 + 已过等待窗口 → 无法判断：可能是模块未启用，也可能是
+            // 框架根本不提供状态服务（NPatch / LSPatch 这类免 root 框架）。
+            // 曾绑定过又断开 → 框架是支持的，那才是真的未激活。
+            if (!sServiceEverBound && sInitAt > 0
+                    && android.os.SystemClock.uptimeMillis() - sInitAt >= SERVICE_WAIT_MS) {
+                return State.SERVICE_UNAVAILABLE;
+            }
+            return State.NOT_ACTIVE;
+        }
         try {
             List<String> scope = svc.getScope();
             if (scope != null) {
