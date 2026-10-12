@@ -529,13 +529,18 @@ final class Mp4Converter {
 
             // ---------- 音频转码主循环(解码->桥接->编码->mux) ----------
             // ---------- 音频: 源已是 AAC, 直接 remux 复制到 MP4(每秒千帧级, 不卡死无损) ----------
-            if (hasAudio) {
+            // 2026-10-11 修复(审查 P4):addTrack 失败时 encATrack=-1、aRemux=false,
+            // 但原实现仍进入本循环逐样本 writeSampleData(-1,...) —— 每个样本抛一次异常
+            // 并经日志门面写一条跨进程日志(一条视频上万条),白白把转换时间耗光。
+            // aRemux/encATrack 两道判定缺一不可:前者是「建轨成功」的事实,后者是索引本身。
+            if (hasAudio && aRemux && encATrack >= 0) {
                 extractor.unselectTrack(aTrack);
                 extractor.selectTrack(aTrack);
                 java.nio.ByteBuffer aBuf = java.nio.ByteBuffer.allocate(4 * 1024 * 1024);
                 android.media.MediaCodec.BufferInfo aInfo = new android.media.MediaCodec.BufferInfo();
                 long aBaseUs = -1, aLastPts = -1;
                 int aSafety = 0;
+                int audioCopyErrLogs = 0;   // 写失败只记前 3 次日志(见下方 catch)
                 boolean aEos = false;
                 while (!aEos && aSafety < 3000000) {
                     aSafety++;
@@ -565,7 +570,12 @@ final class Mp4Converter {
                     try {
                         muxer.writeSampleData(encATrack, aBuf, aInfo);
                     } catch (Throwable we) {
-                        MainModule.logMsg("[SBPlus] audio copy write err: " + we);
+                        // 失败绝不逐样本刷日志:一条视频可达上万样本,失败时会把日志与
+                        // Binder 通路全部淹没。只记前 3 次,其余静默计数。
+                        if (audioCopyErrLogs < 3) {
+                            audioCopyErrLogs++;
+                            MainModule.logMsg("[SBPlus] audio copy write err(" + audioCopyErrLogs + "): " + we);
+                        }
                     }
                     extractor.advance();
                     if (task != null && (aSafety % 5000 == 0)) {

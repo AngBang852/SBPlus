@@ -341,7 +341,12 @@ public class HomeLogoHelper {
         try {
             SharedPreferences sp = prefs(ctx);
             return sp != null && sp.getBoolean("alpha_" + name, false);
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            // 2026-10-09 审核 M3：原为空 catch。
+            // 注意：sp == null（prefs 尚未就绪）是**预期情况**，走默认值 false 合理、不告警；
+            // 只有真正抛异常（读失败）才提示 —— 与 _AUDIT.md「已有安全默认值兜底的不补日志」一致。
+            MainHook.warnPrefOnce("HomeLogoHelper.isAlphaBg", String.valueOf(t));
+        }
         return false;
     }
 
@@ -406,7 +411,11 @@ public class HomeLogoHelper {
         try {
             SharedPreferences sp = prefs(ctx);
             return sp == null || sp.getBoolean("follow", true);   // 默认开
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            // 2026-10-09 审核 M3：原为空 catch 直接 return true。
+            // sp == null 是预期情况（走默认开），不告警；只有读失败才提示。
+            MainHook.warnPrefOnce("HomeLogoHelper.isFollow", String.valueOf(t));
+        }
         return true;
     }
 

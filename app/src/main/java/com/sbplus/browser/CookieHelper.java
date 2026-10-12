@@ -692,6 +692,10 @@ public final class CookieHelper {
         try {
             db = openRW(ctx);
             if (db == null) return 0;
+            // 2026-10-11 修复(审查 P3):待同步到引擎的条目,统一在**事务提交后**再灌。
+            // 事务未提交时引擎读到的仍是旧值;若事务回滚,引擎侧也不该留下库里没有的
+            // cookie —— 顺序与 setCookies 的批量路径一致。
+            java.util.List<String[]> engineSync = new java.util.ArrayList<String[]>();
             db.beginTransaction();
             try {
                 String[] lines = text.split("\r?\n");
@@ -719,11 +723,24 @@ public final class CookieHelper {
                     String value = p[6];
                     if (host.isEmpty() || name.isEmpty()) continue;
                     // httpOnly 标记按解析结果透传(原实现恒传 false,会静默降级登录态)
-                    if (setCookieWithDb(db, host, name, value, path, secure, httpOnly)) ok++;
+                    // 2026-10-11(P3):只写库(与 setCookies 批量路径同款内联写法),引擎
+                    // 同步推迟到事务提交之后 —— 见本方法末尾的 engineSync 循环。
+                    ContentValues cv = buildCookieRow(db, host, name, value, path, secure, httpOnly);
+                    db.delete("cookies", "host_key=? AND name=? AND path=?", new String[]{ host, name, path });
+                    db.insertOrThrow("cookies", null, cv);
+                    ok++;
+                    engineSync.add(new String[]{ host, name, value, path,
+                            secure ? "1" : "0", httpOnly ? "1" : "0" });
                 }
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
+            }
+            // 事务已提交(若上面失败抛异常,根本不会走到这里) —— 现在才通知引擎。
+            // 原实现在循环里直接调 setCookieWithDb,它在事务未提交时就 applyToEngine,与
+            // 另两条批量路径的约定相反(见 setCookies / applyDiff 的说明)。
+            for (String[] e : engineSync) {
+                applyToEngine(e[0], e[1], e[2], e[3], "1".equals(e[4]), "1".equals(e[5]));
             }
         } catch (Throwable t) {
             XposedBridgeLog("importNetscape err: " + t);

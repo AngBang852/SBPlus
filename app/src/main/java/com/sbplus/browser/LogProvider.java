@@ -201,7 +201,9 @@ public class LogProvider extends ContentProvider {
         // 净化:msg 内的裸换行会伪造出额外的日志行(如 "正常\n[SECURITY] ..."),
         // 污染日志并让"读日志排障"本身变得不可信;超长 msg 同理会放大事务体积。
         tag = tag.replace('\n', ' ').replace('\r', ' ');
-        msg = msg.replace('\r', ' ');
+        // 2026-10-11 修复(审查 P7):上面注释承诺净化"裸换行",但 msg 漏了 '\n' ——
+        // 任意页面经 gmLog / 带换行的 URL 就能往日志里插入伪造行,补上,与 tag 一致。
+        msg = msg.replace('\n', ' ').replace('\r', ' ');
         if (msg.length() > MAX_MSG_CHARS) {
             msg = msg.substring(0, MAX_MSG_CHARS) + "…(truncated)";
         }

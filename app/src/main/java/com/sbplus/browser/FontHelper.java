@@ -153,7 +153,11 @@ public final class FontHelper {
     }
 
     public static boolean isEnabled(Context ctx) {
-        try { ensureCfg(ctx); return sCfgEnabled; } catch (Throwable ignored) {}
+        try { ensureCfg(ctx); return sCfgEnabled; } catch (Throwable t) {
+            // 2026-10-09 审核 M3：原为空 catch 直接 return false —— 与"用户关掉了字体功能"
+            // 无法区分，字体静默不生效时用户无从知道原因。
+            MainHook.warnPrefOnce("FontHelper.isEnabled", String.valueOf(t));
+        }
         return false;
     }
     public static void setEnabled(Context ctx, boolean en) {
@@ -221,7 +225,10 @@ public final class FontHelper {
 
     /** 是否应用（开关开且选中文件存在）。热路径:走内存缓存,不做磁盘 stat。 */
     public static boolean shouldApply(Context ctx) {
-        try { ensureCfg(ctx); return sCfgShouldApply; } catch (Throwable ignored) {}
+        try { ensureCfg(ctx); return sCfgShouldApply; } catch (Throwable t) {
+            // 2026-10-09 审核 M3：同上，判定失败与"未启用"无法区分。
+            MainHook.warnPrefOnce("FontHelper.shouldApply", String.valueOf(t));
+        }
         return false;
     }
 

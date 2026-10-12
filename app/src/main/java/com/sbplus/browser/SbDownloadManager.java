@@ -250,7 +250,15 @@ public class SbDownloadManager {
 
     /** 暂停任务(保留已下载分片, 不取消). */
     public static void pause(String id) {
-        try { if (id != null) PAUSED.add(id); } catch (Throwable ignored) {}
+        try {
+            // 2026-10-11(F1):只允许暂停「正在下载」的任务。转换中/已完成的任务暂停
+            // 无意义,而且会留下一个陈旧 PAUSED 标记 —— 通知/列表会因此显示错误的
+            // 「继续」按钮,而它旁边的「取消」会把**已完成的产物文件**删掉。
+            // 列表/通知的暂停按钮本就只在 DOWNLOADING 状态出现,此判定不影响既有路径。
+            Task t = TASKS.get(id);
+            if (t == null || t.status != STATUS_DOWNLOADING) return;
+            PAUSED.add(id);
+        } catch (Throwable ignored) {}
     }
 
     /** 继续任务(清除暂停标记). */
@@ -313,6 +321,46 @@ public class SbDownloadManager {
         }
     }
 
+    // ------------------------------------------------------------------ 下载控制广播(2026-10-11)
+    //
+    // 接收端 MainHook.registerDownloadListReceiver 必须用 RECEIVER_EXPORTED 注册
+    // (通知按钮的广播由系统代发),因此任何第三方应用都能构造同名 action 的 Intent。
+    // 原实现只按 Intent.getPackage() 白名单放行 —— package 是发送方可任意填写的字段,
+    // 既挡不住伪造,又因为下载列表按钮发送时没带 package 而把自家按钮也拒了
+    // (暂停/继续按钮因此完全失效)。修复:所有内部发送方(通知动作 PendingIntent、
+    // 下载列表按钮)一律携带本进程随机令牌,接收端逐字核对;令牌不落盘、不跨进程,
+    // 第三方应用无从获取。
+
+    /** 控制广播的令牌 extra 键(与 MainHook.isTrustedDownloadBroadcast 约定)。 */
+    public static final String EXTRA_CTRL_TOKEN = "sbplus_token";
+
+    /** 本进程随机令牌(每次进程启动重新生成)。 */
+    private static final String CTRL_TOKEN = java.util.UUID.randomUUID().toString();
+
+    public static String ctrlToken() { return CTRL_TOKEN; }
+
+    /** 本进程内发送下载控制广播的统一入口:限定包名 + 携带令牌。 */
+    public static void sendCtrl(Context ctx, String action, String taskId) {
+        try {
+            if (ctx == null || action == null) return;
+            Intent i = new Intent(action);
+            i.setPackage(ctx.getPackageName());
+            if (taskId != null) i.putExtra("task_id", taskId);
+            i.putExtra(EXTRA_CTRL_TOKEN, CTRL_TOKEN);
+            ctx.sendBroadcast(i);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 通知动作按钮的 PendingIntent:requestCode 按「任务 × 槽位」唯一,避免互串。 */
+    private static PendingIntent ctrlAction(Context ctx, Task t, String action, int slot) {
+        Intent i = new Intent(action);
+        i.setPackage(ctx.getPackageName());
+        i.putExtra("task_id", t.id);
+        i.putExtra(EXTRA_CTRL_TOKEN, CTRL_TOKEN);
+        return PendingIntent.getBroadcast(ctx, notifId(t.id) * 8 + slot, i,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
     private static NotificationManager nm(Context ctx) {
         return (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
     }
@@ -353,6 +401,13 @@ public class SbDownloadManager {
             NotificationManager nm = nm(ctx);
             if (nm == null) return;
 
+            // 2026-10-11(F1):暂停态单独呈现。任务暂停时状态被置为 FAILED,但语义不是失败。
+            // 另外必须排除 DONE/CONVERTING:若暂停请求恰好落在"分片下完、开始转码"的
+            // 窗口里,PAUSED 标记会残留到任务完成 —— 那种情况下再显示「继续/取消」,
+            // 取消就会删掉已完成的产物。pause() 也已加了同样的状态门禁,这里是第二层。
+            final boolean paused = isPaused(t.id)
+                    && t.status != STATUS_DONE && t.status != STATUS_CONVERTING;
+
             Notification.Builder b;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 b = new Notification.Builder(ctx, CHANNEL_DOWNLOAD);
@@ -373,6 +428,12 @@ public class SbDownloadManager {
                 } else {
                     b.setProgress(0, 0, true);
                 }
+            } else if (paused) {
+                // 2026-10-11(F1):原实现把暂停态套进"下载失败"文案(状态确实是 FAILED),且
+                // 20 秒后自动撤除通知 —— 「继续」按钮因此无从谈起。这里单独呈现,且不自动撤除。
+                b.setContentText("已暂停 · 已完成 " + t.partCount + "/" + t.partTotal + " 分片");
+                b.setProgress(0, 0, false);
+                b.setAutoCancel(false);
             } else if (t.status == STATUS_CONVERTING) {
                 b.setContentText("正在转换 MP4...");
                 b.setProgress(0, 0, true);
@@ -392,15 +453,38 @@ public class SbDownloadManager {
             try {
                 Intent i = new Intent("com.sbplus.browser.ACTION_SHOW_DOWNLOADS");
                 i.setPackage(ctx.getPackageName());
+                i.putExtra(EXTRA_CTRL_TOKEN, CTRL_TOKEN);   // P1:接收端要求令牌
                 PendingIntent pi = PendingIntent.getBroadcast(ctx, notifId(t.id), i,
                         PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
                 b.setContentIntent(pi);
             } catch (Throwable ignored) {}
 
+            // 2026-10-11(F1):通知栏直接控制下载(暂停/继续/取消)。
+            // 动作广播携带进程级令牌,接收端逐字核对,第三方伪造同名 action 也无法触发。
+            try {
+                if (paused) {
+                    b.addAction(android.R.drawable.ic_media_play, "继续",
+                            ctrlAction(ctx, t, "com.sbplus.browser.ACTION_RESUME_DL", 3));
+                    b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "取消",
+                            ctrlAction(ctx, t, "com.sbplus.browser.ACTION_CANCEL_DL", 2));
+                } else if (t.status == STATUS_DOWNLOADING) {
+                    // 2026-10-11(F1):仅 m3u8 任务支持暂停(单文件/合并任务没有断点,
+                    // downloadOneItem 不检查 isPaused —— 给它们挂暂停按钮只会骗用户)。
+                    // 取消则所有下载中的任务都支持。判定与下载列表的 canPause 一致。
+                    if ("m3u8".equals(t.kind)) {
+                        b.addAction(android.R.drawable.ic_media_pause, "暂停",
+                                ctrlAction(ctx, t, "com.sbplus.browser.ACTION_PAUSE_DL", 1));
+                    }
+                    b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "取消",
+                            ctrlAction(ctx, t, "com.sbplus.browser.ACTION_CANCEL_DL", 2));
+                }
+            } catch (Throwable ignored) {}
+
             nm.notify(notifId(t.id), b.build());
 
             // 完成后延迟移除通知:留 20 秒给用户看到结果(4 秒太短,常被误以为没通知)
-            if (t.status == STATUS_DONE || t.status == STATUS_FAILED) {
+            // 2026-10-11(F1):暂停态不移除,否则「继续」按钮还没点到就随通知一起没了。
+            if ((t.status == STATUS_DONE || t.status == STATUS_FAILED) && !paused) {
                 final String fid = t.id;
                 final int nid = notifId(t.id);
                 new java.lang.Thread(new Runnable() {
