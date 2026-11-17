@@ -839,6 +839,67 @@ private static final String[] RANDOM_UAS = new String[]{
         try { return cl.loadClass(name); } catch (ClassNotFoundException e) { return null; }
     }
 
+    /**
+     * 多候选类名解析：按顺序尝试，返回第一个能加载的类。
+     *
+     * <p>2026-11-17 适配 31.0.2.39 时新增：三星会在版本更新里<b>迁移类所在包</b>
+     * （该版本把 {@code settings.AboutFragment} 移到 {@code settings.about.AboutFragment}）。
+     * 把新版本名放前面、旧版本名放后面，即可同时支持新旧浏览器，无需再为每次更新改代码。
+     *
+     * @param cl    宿主（浏览器）ClassLoader
+     * @param names 候选类名，新→旧
+     * @return 第一个加载成功的 Class
+     * @throws RuntimeException 所有候选都加载不到
+     */
+    public static Class<?> loadFirstClass(ClassLoader cl, String... names) {
+        for (int i = 0; i < names.length; i++) {
+            Class<?> c = findClassIfExists(names[i], cl);
+            if (c != null) {
+                if (i > 0) {
+                    MainModule.logMsg("[SBPlus] class fallback " + names[0] + " -> " + names[i]);
+                }
+                return c;
+            }
+        }
+        throw new RuntimeException("none of classes found: " + java.util.Arrays.toString(names));
+    }
+
+    /**
+     * 多候选方法名 hook（<b>只查目标类自身声明的成员</b>，不向父类扩散）。
+     *
+     * <p>2026-11-17 适配 31.0.2.39 时新增：三星把覆写方法改名的情况
+     * —— 该版本 {@code SettingsActivity} 不再覆写 {@code onBackPressed}，
+     * 改用 OnBackPressedDispatcher 回调 {@code handleOnBackPressed()}，并新增
+     * {@code shouldInterceptBackPress()}。旧代码按老名字精确查找，会直接抛
+     * NoSuchMethodException 被 catch 掉，表现为「真机上返回键拦截悄悄失效」。
+     *
+     * <p>这里特意<b>不</b>用 findAndHookMethodInHierarchy：若向父类找，会命中
+     * {@code android.app.Activity.onBackPressed}，那是对所有 Activity 生效，副作用太大。
+     *
+     * @param clazz       目标类
+     * @param methodNames 候选方法名，按优先级排列
+     * @param paramTypes  参数类型（各候选方法必须同签名）
+     * @param callback    hook 回调
+     * @return 实际挂上的方法名；全部候选都不存在于该类时返回 null
+     */
+    public static String findAndHookMethodAny(Class<?> clazz, String[] methodNames,
+                                              Class<?>[] paramTypes, XC_MethodHook callback) {
+        for (String name : methodNames) {
+            boolean declared = false;
+            try {
+                clazz.getDeclaredMethod(name, paramTypes);
+                declared = true;
+            } catch (Throwable ignored) {}
+            if (!declared) continue;
+            Object[] args = new Object[paramTypes.length + 1];
+            System.arraycopy(paramTypes, 0, args, 0, paramTypes.length);
+            args[paramTypes.length] = callback;
+            findAndHookMethod(clazz, name, args);
+            return name;
+        }
+        return null;
+    }
+
     public static Object newInstance(Class<?> clazz, Class<?>[] paramTypes, Object... args) {
         try { return clazz.getDeclaredConstructor(paramTypes).newInstance(args); }
         catch (Throwable t) { throw new RuntimeException(t); }
@@ -2062,116 +2123,153 @@ private static final String[] RANDOM_UAS = new String[]{
      * switch page (not exit all the way to browser settings). safeReplaceFragment does not
      * add a back stack entry, so intercept onBackPressed and manually navigate back.
      */
+    /**
+     * 处理 SBPlus 自建 picker 页的返回：回退到上一级 SBPlus 页面。
+     *
+     * <p>2026-11-17 从 hookBackPress 的匿名回调里抽出，供两处复用：
+     * Activity 自身的返回入口、以及 finish() 兜底。
+     *
+     * @param act 当前 SettingsActivity
+     * @return true=已消费（调用方必须阻断宿主返回）；false=不处理，交还宿主
+     */
+    private static boolean handlePickerBack(Object act) {
+        if (!sInPickerPage) return false;
+        // 关键守卫:只有「我们自建 picker 页所在的那个 SettingsActivity」才拦截返回。
+        // 三星原生调试子页由 FragmentCommonHelper.startFragment 另起独立
+        // SettingsActivity,身份不同 -> 放行走系统返回,实现逐级返回不跳页。
+        if (!isPickerActivity(act)) {
+            MainModule.logMsg("[SBPlus] back: not picker activity, let system handle");
+            return false;
+        }
+        String cls = "com.sec.android.app.sbrowser.common.settings.PreferenceFragmentCustom";
+        if (PAGE_DEBUG_SETTINGS_NATIVE.equals(sCurrentPickerPage)) {
+            // 原生「调试设置」页是我们用 safeReplaceFragment 放进本 Activity 的,
+            // 返回应回到上一层「调试页面」子页,而不是直接跳回 SBPlus 主页。
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_DEBUG_MAIN);
+            sCurrentPickerPage = PAGE_DEBUG_MAIN;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: native debug settings -> debug main");
+        } else if (PAGE_VIDEO_BG_PICKER.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_HOME_BEAUTIFY);
+            sCurrentPickerPage = PAGE_HOME_BEAUTIFY;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: video bg picker -> home beautify");
+        } else if (PAGE_HOME_BEAUTIFY.equals(sCurrentPickerPage)) {
+            sCurrentPickerPage = null;
+            sInPickerPage = false;
+            navigateToFragment(act, cls, null);
+            MainModule.logMsg("[SBPlus] back: home beautify -> main menu");
+        } else if (PAGE_USERSCRIPT_DETAIL.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_USERSCRIPT_LIST);
+            sCurrentPickerPage = PAGE_USERSCRIPT_LIST;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: detail -> list");
+        } else if (PAGE_USERSCRIPT_LIST.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
+            sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: list -> picker");
+        } else if (PAGE_USERSCRIPT_ERRORS.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
+            sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: errors -> picker");
+        } else if (PAGE_USERSCRIPT_REQUIRE.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
+            sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: require -> picker");
+        } else if (PAGE_USERSCRIPT_RESOURCE.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
+            sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: resource -> picker");
+        } else if (PAGE_UA_PRESET_PICKER.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_UA_PICKER);
+            sCurrentPickerPage = PAGE_UA_PICKER;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: ua preset -> ua picker");
+        } else if (PAGE_UA_PER_SITE.equals(sCurrentPickerPage)) {
+            android.os.Bundle la = new android.os.Bundle();
+            la.putString(ARG_PAGE, PAGE_UA_PICKER);
+            sCurrentPickerPage = PAGE_UA_PICKER;
+            navigateToFragment(act, cls, la);
+            MainModule.logMsg("[SBPlus] back: ua per-site -> ua picker");
+        } else if (PAGE_USERSCRIPT_PICKER.equals(sCurrentPickerPage)) {
+            sCurrentPickerPage = null;
+            sInPickerPage = false;
+            navigateToFragment(act, cls, null);
+            MainModule.logMsg("[SBPlus] back: picker -> home");
+        } else {
+            sCurrentPickerPage = null;
+            sInPickerPage = false;
+            navigateToFragment(act, cls, null);
+            MainModule.logMsg("[SBPlus] back from picker");
+        }
+        return true;
+    }
+
     private static void hookBackPress(ClassLoader cl) {
         try {
             Class<?> activityCls = loadClassSafely(
                     "com.sec.android.app.sbrowser.settings.SettingsActivity", cl);
-            findAndHookMethod(activityCls, "onBackPressed",
+            // ---- 路径 1：Activity 自身声明的返回入口 ----
+            // 旧版覆写 onBackPressed；31.0.2.39 改为 OnBackPressedDispatcher 的
+            // handleOnBackPressed()（同版新增 shouldInterceptBackPress）。两个名字按序尝试；
+            // 只查本类声明的成员，避免命中 Activity.onBackPressed 污染所有页面。
+            String backMethod = findAndHookMethodAny(activityCls,
+                    new String[]{"onBackPressed", "handleOnBackPressed"},
+                    new Class<?>[0],
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             MainModule.logMsg("[SBPlus] onBackPressed CALLED inPicker=" + sInPickerPage);
                             try {
-                                if (!sInPickerPage) return;
-                                Object act = param.thisObject;
-                                // 关键守卫:只有「我们自建 picker 页所在的那个 SettingsActivity」才拦截返回。
-                                // 三星原生调试子页由 FragmentCommonHelper.startFragment 另起独立
-                                // SettingsActivity,身份不同 -> 放行走系统返回,实现逐级返回不跳页。
-                                if (!isPickerActivity(act)) {
-                                    MainModule.logMsg("[SBPlus] back: not picker activity, let system handle");
-                                    return;
-                                }
-                                String cls = "com.sec.android.app.sbrowser.common.settings.PreferenceFragmentCustom";
-                                if (PAGE_DEBUG_SETTINGS_NATIVE.equals(sCurrentPickerPage)) {
-                                    // 原生「调试设置」页是我们用 safeReplaceFragment 放进本 Activity 的,
-                                    // 返回应回到上一层「调试页面」子页,而不是直接跳回 SBPlus 主页。
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_DEBUG_MAIN);
-                                    sCurrentPickerPage = PAGE_DEBUG_MAIN;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: native debug settings -> debug main");
-                                } else if (PAGE_VIDEO_BG_PICKER.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_HOME_BEAUTIFY);
-                                    sCurrentPickerPage = PAGE_HOME_BEAUTIFY;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: video bg picker -> home beautify");
-                                } else if (PAGE_HOME_BEAUTIFY.equals(sCurrentPickerPage)) {
-                                    sCurrentPickerPage = null;
-                                    sInPickerPage = false;
-                                    navigateToFragment(act, cls, null);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: home beautify -> main menu");
-                                } else if (PAGE_USERSCRIPT_DETAIL.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_USERSCRIPT_LIST);
-                                    sCurrentPickerPage = PAGE_USERSCRIPT_LIST;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: detail -> list");
-                                } else if (PAGE_USERSCRIPT_LIST.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
-                                    sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: list -> picker");
-                                } else if (PAGE_USERSCRIPT_ERRORS.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
-                                    sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: errors -> picker");
-                                } else if (PAGE_USERSCRIPT_REQUIRE.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
-                                    sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: require -> picker");
-                                } else if (PAGE_USERSCRIPT_RESOURCE.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_USERSCRIPT_PICKER);
-                                    sCurrentPickerPage = PAGE_USERSCRIPT_PICKER;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: resource -> picker");
-                                } else if (PAGE_UA_PRESET_PICKER.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_UA_PICKER);
-                                    sCurrentPickerPage = PAGE_UA_PICKER;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: ua preset -> ua picker");
-                                } else if (PAGE_UA_PER_SITE.equals(sCurrentPickerPage)) {
-                                    android.os.Bundle la = new android.os.Bundle();
-                                    la.putString(ARG_PAGE, PAGE_UA_PICKER);
-                                    sCurrentPickerPage = PAGE_UA_PICKER;
-                                    navigateToFragment(act, cls, la);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: ua per-site -> ua picker");
-                                } else if (PAGE_USERSCRIPT_PICKER.equals(sCurrentPickerPage)) {
-                                    sCurrentPickerPage = null;
-                                    sInPickerPage = false;
-                                    navigateToFragment(act, cls, null);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back: picker -> home");
-                                } else {
-                                    sCurrentPickerPage = null;
-                                    sInPickerPage = false;
-                                    navigateToFragment(act, cls, null);
-                                    param.setResult(null);
-                                    MainModule.logMsg("[SBPlus] back from picker");
-                                }
+                                if (handlePickerBack(param.thisObject)) param.setResult(null);
                             } catch (Throwable t) {
                                 MainModule.logMsg("[SBPlus] back press hook error: " + t);
                             }
                         }
                     });
-            MainModule.logMsg("[SBPlus] onBackPressed hooked");
+            if (backMethod == null) {
+                MainModule.logMsg("[SBPlus] back-press hook failed: neither onBackPressed nor handleOnBackPressed on "
+                        + activityCls.getName());
+            } else {
+                MainModule.logMsg("[SBPlus] back-press hooked on " + backMethod);
+            }
+
+            // ---- 路径 2（兜底）：finish() ----
+            // 31.0.2.39 真机实测：picker 页按返回键既不进 onBackPressed 也不进
+            // handleOnBackPressed（新版走 OnBackPressedDispatcher/Fragment 栈），而是直接
+            // finish 掉整个 SettingsActivity —— 表现为「返回后跳回浏览器主页」。
+            // 离开 picker 页最终一定会 finish()，因此在 Activity.finish() 上兜底拦截：
+            // SettingsActivity 未覆写 finish，用向上查找拿到基类方法；回调里只处理 picker Activity。
+            try {
+                findAndHookMethodInHierarchy(activityCls, "finish", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (handlePickerBack(param.thisObject)) {
+                                param.setResult(null);
+                                MainModule.logMsg("[SBPlus] back intercepted at finish()");
+                            }
+                        } catch (Throwable t) {
+                            MainModule.logMsg("[SBPlus] finish back hook error: " + t);
+                        }
+                    }
+                });
+                MainModule.logMsg("[SBPlus] back-press fallback hooked on finish()");
+            } catch (Throwable t) {
+                MainModule.logMsg("[SBPlus] finish fallback hook failed: " + t);
+            }
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] hookBackPress failed: " + t);
         }
@@ -5698,6 +5796,108 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
         }
     }
 
+    /**
+     * 2026-10-18 修复「视频背景失效 → 仍显示原壁纸」的核心函数。
+     *
+     * <p>问题复现(真机 31.0.0.64 日志):
+     * <pre>
+     * [SBPlus][VIDEO] bgInflate #1 ... enabled=true path=/storage/emulated/0/Movies/SBPlus/SBPlus_video_bg (1).mp4 exists=false
+     * [SBPlus][VIDEO] skip: file missing /storage/emulated/0/Movies/SBPlus/SBPlus_video_bg (1).mp4
+     * </pre>
+     * 钩子挂上了、开关也开着,但 prefs 里存的是**已经不存在**的文件路径:MediaStore
+     * 每次插图都会按 DISPLAY_NAME 去重改名(… (1).mp4 / … (2).mp4),用户删掉其中一个、
+     * 或系统重整媒体库之后,旧路径就永久指向不存在的文件。原实现在
+     * {@code attachVideoBackground} 里遇到 {@code !f.exists()} 直接 return,于是
+     * 视频层永远不挂载 —— 表现就是「开了视频背景,主页还是原来的壁纸」,且没有任何日志。
+     *
+     * <p>修复策略:路径失效时,在 Movies/SBPlus(以及历史遗留的 /sdcard/SBPlus)里
+     * 找**最新的那个** SBPlus 视频,回写 prefs 并继续播放。这样即便文件名被系统改名,
+     * 用户也不需要重新选一遍视频。
+     */
+    private static String resolveVideoBgPath() {
+        String p = videoBgPath();
+        if (p != null && !p.isEmpty() && new java.io.File(p).exists()) return p;
+        // (a) 私有视频库(现行存放位置):归宿主包所有,零权限、路径稳定
+        try {
+            java.io.File own = (sAppContext != null) ? newestStoredVideo(sAppContext) : null;
+            if (own != null) {
+                String ap = own.getAbsolutePath();
+                MainModule.logMsg("[SBPlus][VIDEO] adopt private store (" + p + ") -> " + ap);
+                saveVideoBgPath(ap);
+                return ap;
+            }
+        } catch (Throwable ignored) {}
+        // (b) 历史位置 Movies/SBPlus(仅当本包仍是文件 owner 时才查得到)
+        String found = findLatestSavedVideo();
+        if (found != null && !found.isEmpty()) {
+            MainModule.logMsg("[SBPlus][VIDEO] stale pref path (" + p + ") -> adopt " + found);
+            saveVideoBgPath(found);
+            return found;
+        }
+        return p;
+    }
+
+    /** 在 MediaStore / 公共目录里找最新的 SBPlus 视频背景文件;找不到返回 null。 */
+    private static String findLatestSavedVideo() {
+        // (1) MediaStore:本进程自己插入的条目无需 READ_MEDIA_VIDEO 权限即可见。
+        try {
+            if (sAppContext != null) {
+                String relCol = null;
+                String sel = null;
+                String[] selArgs = null;
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    relCol = "relative_path";
+                    sel = relCol + " LIKE ?";
+                    selArgs = new String[]{"%" + android.os.Environment.DIRECTORY_MOVIES + "/SBPlus%"};
+                }
+                android.database.Cursor c = sAppContext.getContentResolver().query(
+                        android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        new String[]{"_data", "_display_name", "date_modified"},
+                        sel, selArgs, "date_modified DESC");
+                if (c != null) {
+                    try {
+                        while (c.moveToNext()) {
+                            String name = c.getString(1);
+                            String data = c.getString(0);
+                            if (name == null || data == null) continue;
+                            String lower = name.toLowerCase(java.util.Locale.ROOT);
+                            if (!lower.startsWith("sbplus_video_") && !lower.contains("sbplus_video_bg")) continue;
+                            if (new java.io.File(data).exists()) return data;
+                        }
+                    } finally {
+                        c.close();
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus][VIDEO] MediaStore lookup failed: " + t);
+        }
+        // (2) 直接扫目录:MediaStore 未索引到(媒体库被清过)或查询被拒时的兜底。
+        String[] dirs = new String[]{
+                android.os.Environment.getExternalStorageDirectory() + "/" + android.os.Environment.DIRECTORY_MOVIES + "/SBPlus",
+                android.os.Environment.getExternalStorageDirectory() + "/SBPlus"
+        };
+        for (String dirPath : dirs) {
+            try {
+                java.io.File dir = new java.io.File(dirPath);
+                java.io.File[] files = dir.listFiles();
+                if (files == null) continue;
+                java.io.File best = null;
+                for (java.io.File f : files) {
+                    if (f == null || !f.isFile()) continue;
+                    String lower = f.getName().toLowerCase(java.util.Locale.ROOT);
+                    if (!lower.endsWith(".mp4")) continue;
+                    if (!lower.startsWith("sbplus_video") && !lower.contains("sbplus_video_bg")) continue;
+                    if (best == null || f.lastModified() > best.lastModified()) best = f;
+                }
+                if (best != null) return best.getAbsolutePath();
+            } catch (Throwable t) {
+                MainModule.logMsg("[SBPlus][VIDEO] dir scan failed " + dirPath + ": " + t);
+            }
+        }
+        return null;
+    }
+
     /** 主页美化:去除主页搜索框内文字。 */
     private static boolean isHomeClearTextEnabled() { return readBoolPref(KEY_ENABLE_HOME_CLEAR_TEXT, false); }
 
@@ -5788,8 +5988,18 @@ HookRegistry.loadRevoked(sAppContext);   // 仅注入 Context，不读盘
         callMethod(pref, "setTitle", tt(T("主页视频背景", "Homepage video background"), "video-background"));
         callMethod(pref, "setKey", "sbplus_enable_video_bg");
         String path = videoBgPath();
-        callMethod(pref, "setSummary",
-                path.isEmpty() ? T("点击选择视频文件作为主页背景", "Tap to choose a video as homepage background") : (T("已设置视频背景", "Video background set")));
+        // 2026-10-18: 三种状态要分清楚。以前只有「空 / 已设置」两态,于是 prefs 里存着一个
+        // 已经读不到的路径(换包名、媒体库改名、用户手动删文件)时,设置页仍然宣称"已设置视频背景",
+        // 实际主页什么都不显示 —— 用户只会以为功能坏了,却没有任何线索。
+        String summary;
+        if (path.isEmpty()) {
+            summary = T("点击选择视频文件作为主页背景", "Tap to choose a video as homepage background");
+        } else if (!new java.io.File(path).isFile()) {
+            summary = T("原视频已失效,请重新选择一次", "Previous video is gone, choose it again");
+        } else {
+            summary = T("已设置视频背景", "Video background set");
+        }
+        callMethod(pref, "setSummary", summary);
         callMethod(pref, "setChecked", isVideoBgEnabled());
         callMethod(pref, "setSelectable", true);
         try {
@@ -8004,7 +8214,7 @@ private static boolean isThemeMasterEnabled() {
         Class<?> prefCustomCls = loadClassSafely(
                 "com.sec.android.app.sbrowser.common.settings.PreferenceCustom", cl);
 
-        String cur = videoBgPath();
+        String cur = resolveVideoBgPath();
         boolean on = isVideoBgEnabled();
 
         // ---- 当前状态 ----
@@ -8299,6 +8509,60 @@ private static boolean isThemeMasterEnabled() {
                         android.os.Environment.DIRECTORY_MOVIES), "SBPlus");
     }
 
+    /**
+     * 2026-10-18 新增:视频背景的**私有**存放目录(宿主 app 自己的外部私有目录)。
+     *
+     * <p>为什么必须换到这里 —— 真机取证(31.0.0.64):
+     * <pre>
+     * _display_name=SBPlus_video_bg (2).mp4
+     * owner_package_name=com.sec.android.app.sbrowser.beta   ← 不是当前包!
+     * READ_MEDIA_VIDEO: granted=false
+     * </pre>
+     * 老实现把视频写进 MediaStore 的 Movies/SBPlus。文件的所有权绑在**写入它的那个包**上:
+     * 现在模块跑在 {@code com.sec.android.app.sbrowser}(稳定版)里,而库里的视频是当年在
+     * {@code ...sbrowser.beta} 里写入的 —— 既不归当前包所有,又没有 READ_MEDIA_VIDEO,
+     * 于是:
+     * <ul>
+     *   <li>MediaStore 查询被按 owner 过滤 → 一条也查不到(所以自动找回也找不到);</li>
+     *   <li>直接 {@code new File(path).exists()} → scoped storage 拒绝,恒为 false;</li>
+     *   <li>结果就是"开关开着、路径有值,但视频层永远挂不上,主页还是原壁纸"。</li>
+     * </ul>
+     * 私有目录 {@code getExternalFilesDir/video_bg} 归宿主包自己,读写**零权限**,
+     * 路径固定不会被 MediaStore 改名(… (1).mp4 / … (2).mp4),卸载即清理。
+     */
+    private static java.io.File videoBgStoreDir(android.content.Context ctx) {
+        java.io.File base = null;
+        try { base = ctx.getExternalFilesDir(null); } catch (Throwable ignored) {}
+        if (base == null) { try { base = ctx.getFilesDir(); } catch (Throwable ignored) {} }
+        if (base == null) return null;
+        java.io.File dir = new java.io.File(base, "video_bg");
+        if (!dir.exists()) {
+            try { dir.mkdirs(); } catch (Throwable ignored) {}
+        }
+        return dir;
+    }
+
+    /** 私有视频库里最新的一个视频;没有返回 null。 */
+    private static java.io.File newestStoredVideo(android.content.Context ctx) {
+        try {
+            java.io.File dir = videoBgStoreDir(ctx);
+            if (dir == null) return null;
+            java.io.File[] files = dir.listFiles();
+            if (files == null) return null;
+            java.io.File best = null;
+            for (java.io.File f : files) {
+                if (f == null || !f.isFile()) continue;
+                String fn = f.getName().toLowerCase(java.util.Locale.ROOT);
+                if (!(fn.endsWith(".mp4") || fn.endsWith(".webm") || fn.endsWith(".mkv"))) continue;
+                if (best == null || f.lastModified() > best.lastModified()) best = f;
+            }
+            return best;
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus][VIDEO] newestStoredVideo err: " + t);
+            return null;
+        }
+    }
+
     /** 库里某个视频对应的"缩略图"文件(同名 .jpg)。 */
     private static java.io.File videoThumbFileFor(java.io.File video) {
         String n = video.getName();
@@ -8319,6 +8583,20 @@ private static boolean isThemeMasterEnabled() {
      */
     private static java.util.List<java.io.File> listVideoLib(Context ctx) {
         java.util.List<java.io.File> out = new java.util.ArrayList<>();
+        // 2026-10-18: 私有视频库(现行存放位置)必须排在最前 —— 它零权限可见、路径稳定,
+        // 而 Movies/SBPlus 下的历史文件在当前包下可能连 exists() 都是 false(owner 是 beta 包)。
+        try {
+            java.io.File storeDir = videoBgStoreDir(ctx);
+            java.io.File[] own = (storeDir == null) ? null : storeDir.listFiles();
+            if (own != null) {
+                for (java.io.File f : own) {
+                    if (f == null || !f.isFile()) continue;
+                    String fn = f.getName().toLowerCase(java.util.Locale.ROOT);
+                    if (!(fn.endsWith(".mp4") || fn.endsWith(".webm") || fn.endsWith(".mkv"))) continue;
+                    out.add(f);
+                }
+            }
+        } catch (Throwable ignoredOwn) {}
         try {
             android.content.ContentResolver cr = ctx.getContentResolver();
             android.net.Uri base = android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
@@ -8531,6 +8809,22 @@ private static boolean isThemeMasterEnabled() {
                     }
                 }
             }
+            // 3) 2026-10-18: 私有视频库(getExternalFilesDir/video_bg)。现在视频背景真正存在这里,
+            // 清理入口必须同步,否则「清空视频背景」后主页仍能命中旧文件。
+            try {
+                java.io.File storeDir = videoBgStoreDir(ctx);
+                java.io.File[] own = (storeDir == null) ? null : storeDir.listFiles();
+                if (own != null) {
+                    for (java.io.File f : own) {
+                        if (f == null || !f.isFile()) continue;
+                        String fn = f.getName().toLowerCase(java.util.Locale.ROOT);
+                        boolean isPart = fn.endsWith(".part");
+                        boolean isVid = fn.endsWith(".mp4") || fn.endsWith(".webm") || fn.endsWith(".mkv");
+                        if (!isPart && !isVid) continue;
+                        if (f.delete()) deleted++;
+                    }
+                }
+            } catch (Throwable ignoredOwn) {}
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] deleteVideoBgFiles error: " + t);
         }
@@ -9879,13 +10173,30 @@ private static void showUaGroupDialog(final Context ctx) {
 
         // 屏蔽「关于」页更新按钮:把 UPDATE 状态降级为 NO_UPDATE,更新按钮永不显示。
         try {
-            Class<?> stateCls = loadClassSafely(
-                    "com.sec.android.app.sbrowser.settings.AboutFragment$State", cl);
+            // 2026-11-17 适配 31.0.2.39：AboutFragment 迁包
+            //   settings.AboutFragment -> settings.about.AboutFragment（$State 内部类一起迁）。
+            // 成对尝试，新包名优先，旧包名兜底 —— 同时兼容 v31.0.0.64 及更早版本。
+            Class<?> stateCls = null, aboutFrag = null;
+            String[][] aboutCandidates = {
+                    {"com.sec.android.app.sbrowser.settings.about.AboutFragment",
+                     "com.sec.android.app.sbrowser.settings.about.AboutFragment$State"},
+                    {"com.sec.android.app.sbrowser.settings.AboutFragment",
+                     "com.sec.android.app.sbrowser.settings.AboutFragment$State"},
+            };
+            for (String[] pair : aboutCandidates) {
+                Class<?> f = findClassIfExists(pair[0], cl);
+                Class<?> s = findClassIfExists(pair[1], cl);
+                if (f != null && s != null) {
+                    aboutFrag = f;
+                    stateCls = s;
+                    MainModule.logMsg("[SBPlus] AboutFragment resolved: " + pair[0]);
+                    break;
+                }
+            }
+            if (aboutFrag == null) throw new ClassNotFoundException("AboutFragment (all candidates)");
             final Object noUpdateState =
                     getStaticObjectField(stateCls, "NO_UPDATE");
 
-            Class<?> aboutFrag = loadClassSafely(
-                    "com.sec.android.app.sbrowser.settings.AboutFragment", cl);
             findAndHookMethod(aboutFrag, "updateViews", stateCls,
                     new XC_MethodHook() {
                         @Override
@@ -10193,6 +10504,20 @@ private static void showUaGroupDialog(final Context ctx) {
             final XC_MethodHook bgHook = new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            // 2026-10-18 诊断:证明钩子真的被宿主调用(前 6 次,冷启动共 9 次)。
+                            // 没有这行日志 = 31.0.0.64 的主页背景容器换了类,钩子空转。
+                            try {
+                                int n = ++sVideoInflateCount;
+                                if (n <= 6) {
+                                    String p0 = videoBgPath();
+                                    MainModule.logMsg("[SBPlus][VIDEO] bgInflate #" + n
+                                            + " cls=" + param.thisObject.getClass().getName()
+                                            + " enabled=" + isVideoBgEnabled()
+                                            + " path=" + p0
+                                            + " exists=" + (p0 != null && !p0.isEmpty() && new java.io.File(p0).exists())
+                                            + " parent=" + (((android.view.View) param.thisObject).getParent() != null));
+                                }
+                            } catch (Throwable ignoredDiag) {}
                             try {
                                 attachVideoBackground(param.thisObject);
                                 // Logo 解码(GIF 抠背景几百毫秒)延迟到初始布局完成后执行,避免阻塞冷启动 UI
@@ -10529,84 +10854,87 @@ private static void showUaGroupDialog(final Context ctx) {
         return "sbplus_video_" + ts + "_" + base + ".mp4";
     }
 
+    /**
+     * 把用户选中的视频复制进**宿主 app 私有目录**(getExternalFilesDir/video_bg),
+     * 返回可直接 setDataSource 的绝对路径。
+     *
+     * <p>2026-10-18 重写。原实现写 MediaStore 的 Movies/SBPlus,踩了两个坑:
+     * <ol>
+     *   <li>MediaStore 遇到同名文件会自动改名(… (1).mp4 / … (2).mp4),prefs 里存下的
+     *       旧路径在改名或删除之后永久失效 → 视频背景静默不生效(主页还是原壁纸);</li>
+     *   <li>文件 owner 绑在「写入它的包」上。模块换到 com.sec.android.app.sbrowser 之后,
+     *       早先由 com.sec.android.app.sbrowser.beta 写入的文件既不归本包所有,又没有
+     *       READ_MEDIA_VIDEO,连 {@code exists()} 都恒为 false。</li>
+     * </ol>
+     * 私有目录归本包所有:读写零权限、路径固定、不会被媒体库改名,两个坑一次解决。
+     * 代价是卸载浏览器时视频一起清理 —— 对「背景视频」这种一次性素材是合理取舍。
+     */
     private static String copyVideoToPublicDir(android.content.Context ctx, android.net.Uri uri) {
         java.io.InputStream in = null;
         java.io.OutputStream out = null;
         try {
-            android.content.ContentResolver cr = ctx.getContentResolver();
-            // 先拿源文件真实长度(用于 SIZE 元数据)。不把视频整读进内存——大视频会 OOM。
-            long srcLen = -1;
-            android.content.res.AssetFileDescriptor afd = null;
-            try {
-                afd = cr.openAssetFileDescriptor(uri, "r");
-                if (afd != null) srcLen = afd.getLength();
-            } catch (Throwable ignoredA) {
-            } finally {
-                if (afd != null) { try { afd.close(); } catch (Throwable ignored) {} }
-            }
-
-            in = cr.openInputStream(uri);
-            if (in == null) return null;
-
-            // 插入公共 Video 集合,显式写入 SIZE 与时长无关的关键元数据。
-            // 文件名唯一: 原来的固定名 SBPlus_video_bg.mp4 会让每次选择都覆盖上一个,
-            // 导致视频库里永远只有一个文件、无法切换。现在用时间戳 + 原文件名。
-            String uniqueName = uniqueVideoFileName(ctx, uri);
-            android.content.ContentValues cv = new android.content.ContentValues();
-            cv.put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, uniqueName);
-            cv.put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4");
-            if (srcLen > 0) cv.put(android.provider.MediaStore.Video.Media.SIZE, srcLen);
-            cv.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH,
-                    android.os.Environment.DIRECTORY_MOVIES + "/SBPlus");
-            cv.put(android.provider.MediaStore.Video.Media.IS_PENDING, 1);
-            android.net.Uri outUri = cr.insert(
-                    android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv);
-            if (outUri == null) return null;
-
-            out = cr.openOutputStream(outUri);
-            if (out == null) {
-                cr.delete(outUri, null, null);
+            java.io.File dir = videoBgStoreDir(ctx);
+            if (dir == null) {
+                MainModule.logMsg("[SBPlus][VIDEO] copy: no store dir");
                 return null;
             }
-            // 流式复制:边读边写,内存中只保留 64KB 缓冲。
-            byte[] tmp = new byte[65536];
+            in = ctx.getContentResolver().openInputStream(uri);
+            if (in == null) return null;
+
+            java.io.File dst = new java.io.File(dir, "bg_" + System.currentTimeMillis() + ".mp4");
+            java.io.File tmpFile = new java.io.File(dir, dst.getName() + ".part");
+            out = new java.io.FileOutputStream(tmpFile);
+            // 流式复制:内存里只保留 64KB 缓冲,百 MB 视频也不会 OOM
+            byte[] buf = new byte[65536];
             long written = 0;
             int r;
-            while ((r = in.read(tmp)) != -1) {
-                out.write(tmp, 0, r);
+            while ((r = in.read(buf)) != -1) {
+                out.write(buf, 0, r);
                 written += r;
             }
             out.flush();
             out.close();
             out = null;
-
-            // 清除 pending 标记,用实际写入字节数修正 SIZE。
-            android.content.ContentValues done = new android.content.ContentValues();
-            done.put(android.provider.MediaStore.Video.Media.IS_PENDING, 0);
-            done.put(android.provider.MediaStore.Video.Media.SIZE, written);
-            cr.update(outUri, done, null, null);
-
-            // 反查真实文件绝对路径(_data),返回给播放层直接 setVideoPath。
-            android.database.Cursor cur = cr.query(outUri,
-                    new String[]{android.provider.MediaStore.Video.Media.DATA}, null, null, null);
-            if (cur != null) {
-                try {
-                    if (cur.moveToFirst()) {
-                        String data = cur.getString(0);
-                        if (data != null && !data.isEmpty()) return data;
-                    }
-                } finally {
-                    cur.close();
-                }
+            if (!tmpFile.renameTo(dst)) {
+                MainModule.logMsg("[SBPlus][VIDEO] copy: rename failed, keep " + tmpFile.getAbsolutePath());
+                return tmpFile.getAbsolutePath();
             }
-            return outUri.toString();
+            pruneStoredVideos(ctx, dst);
+            MainModule.logMsg("[SBPlus][VIDEO] copy -> " + dst.getAbsolutePath() + " (" + written + " B)");
+            return dst.getAbsolutePath();
         } catch (Throwable t) {
-            MainModule.logMsg("[SBPlus] copyVideoToPublicDir error: " + t);
+            MainModule.logMsg("[SBPlus][VIDEO] copy error: " + t);
             return null;
         } finally {
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
             try { if (out != null) out.close(); } catch (Throwable ignored) {}
         }
+    }
+
+    /** 私有视频库只保留最近 5 个文件,防止单文件百 MB 的素材无限堆积。 */
+    private static void pruneStoredVideos(android.content.Context ctx, final java.io.File keep) {
+        try {
+            java.io.File dir = videoBgStoreDir(ctx);
+            if (dir == null) return;
+            java.io.File[] files = dir.listFiles();
+            if (files == null) return;
+            java.util.List<java.io.File> vids = new java.util.ArrayList<>();
+            for (java.io.File f : files) {
+                if (f == null || !f.isFile()) continue;
+                if (f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".mp4")) vids.add(f);
+            }
+            if (vids.size() <= 5) return;
+            java.util.Collections.sort(vids, new java.util.Comparator<java.io.File>() {
+                @Override public int compare(java.io.File a, java.io.File b) {
+                    return Long.compare(b.lastModified(), a.lastModified());
+                }
+            });
+            for (int i = 5; i < vids.size(); i++) {
+                java.io.File f = vids.get(i);
+                if (keep != null && f.getAbsolutePath().equals(keep.getAbsolutePath())) continue;
+                if (f.delete()) MainModule.logMsg("[SBPlus][VIDEO] pruned " + f.getName());
+            }
+        } catch (Throwable ignored) {}
     }
 
     /** 主页 UI 改造:需求1--把T("添加快捷方式", "Add shortcut")按钮移到"主页设置"左边并统一大小;需求2--搜索或输入网址横线透明化。 */
@@ -12185,6 +12513,11 @@ private static void showUaGroupDialog(final Context ctx) {
     private static String sHomeClockSig;
     private static String sVideoBgSig;
 
+    /** 2026-10-18 诊断:QuickAccessCustomBackground.onFinishInflate 被调用的次数。
+     *  只用于在真机上判断「钩子挂上了但宿主没调用」与「调用了但被早退」这两种
+     *  完全不同的失效原因 —— 前者说明 31.0.0.64 换了背景容器,后者说明是开关/路径问题。 */
+    private static int sVideoInflateCount;
+
     /** 视频背景所依附的那个视图(QuickAccessCustomBackground)。
      *  开关切换时要靠它找到父容器来摘/挂视频层 —— 不能复用 sHomeClockBg,
      *  那是时钟的锚点,两者可能不同。 */
@@ -13275,7 +13608,7 @@ private static void showUaGroupDialog(final Context ctx) {
             sVideoBgSig = null;
 
             boolean on = isVideoBgEnabled();
-            String path = videoBgPath();
+            String path = resolveVideoBgPath();
             MainModule.logMsg("[SBPlus] refreshHomeVideo enabled=" + on + " path=" + path);
 
             // 1) 无论开还是关, 先摘掉现存的视频层(TextureView)与暗角层
@@ -13485,13 +13818,23 @@ private static void showUaGroupDialog(final Context ctx) {
             // 记下锚点供 refreshHomeVideo 摘挂使用(关闭路径走的是 refresh, 不经过这里)
             sVideoBgAnchor = bg;
             if (!isVideoBgEnabled()) return;
-            String path = videoBgPath();
-            if (path == null || path.isEmpty()) return;
+            // 路径失效(文件被 MediaStore 改名/移动/删除)时自动改指向最新一个,见 resolveVideoBgPath
+            String path = resolveVideoBgPath();
+            if (path == null || path.isEmpty()) {
+                MainModule.logMsg("[SBPlus][VIDEO] skip: pref path empty");
+                return;
+            }
             java.io.File f = new java.io.File(path);
-            if (!f.exists()) return;
+            if (!f.exists()) {
+                MainModule.logMsg("[SBPlus][VIDEO] skip: file missing " + path);
+                return;
+            }
 
             android.view.ViewGroup parent = (android.view.ViewGroup) bg.getParent();
-            if (parent == null) return;
+            if (parent == null) {
+                MainModule.logMsg("[SBPlus][VIDEO] skip: no parent yet");
+                return;
+            }
 
             // 幂等短路:同一父容器上已挂着同路径的视频背景 -> 什么都不做。
             // onFinishInflate 冷启动会被调 9 次,不短路会重建 9 次 MediaPlayer。
@@ -25245,7 +25588,19 @@ private static boolean showMediaDialog(String json) {
                 Class<?> decoCls = null;
                 java.lang.reflect.Method addDeco = findMethodByArity(rvCls, "addItemDecoration", 1);
                 if (addDeco != null) decoCls = addDeco.getParameterTypes()[0];
-                if (decoCls == null) decoCls = findClassIfExists("androidx.recyclerview.widget.E0", cl);
+                if (decoCls == null) {
+                    // 兜底：ItemDecoration 被 R8 改名，逐版本变化
+                    // （30.0.0.67=E0 / 31.0.2.39=L0、X）。
+                    // 正常路径是从 addItemDecoration 的参数类型反推，此处只是最后保险。
+                    for (String cand : new String[]{"androidx.recyclerview.widget.E0",
+                            "androidx.recyclerview.widget.L0", "androidx.recyclerview.widget.X"}) {
+                        Class<?> k = findClassIfExists(cand, cl);
+                        if (k != null && findMethodByArity(k, "onDrawOver", 3) != null) {
+                            decoCls = k;
+                            break;
+                        }
+                    }
+                }
                 if (decoCls == null) throw new ClassNotFoundException("RecyclerView.ItemDecoration");
                 java.lang.reflect.Method drawOver = findMethodByArity(decoCls, "onDrawOver", 3);
                 if (drawOver == null) drawOver = findMethodByArity(decoCls, "onDrawOver", 2);

@@ -39,7 +39,7 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 
 | Channel | Package | Version |
 |---------|---------|---------|
-| Stable | `com.sec.android.app.sbrowser` | 30.0.0.67, 30.1.0.67, 31.0.0.64 |
+| Stable | `com.sec.android.app.sbrowser` | 30.0.0.67, 30.1.0.67, 31.0.0.64, 31.0.2.39 |
 | Beta | `com.sec.android.app.sbrowser.beta` | 30.0.0.67 |
 
 The module resolves obfuscated class/method names at runtime, so it generally adapts to newer browser versions automatically without a module update.
@@ -88,7 +88,7 @@ Re-resolution happens on every browser start, so after a browser update the modu
 
 | 渠道 | 包名 | 版本 |
 |------|------|------|
-| 正式版 | `com.sec.android.app.sbrowser` | 30.0.0.67, 30.1.0.67, 31.0.0.64 |
+| 正式版 | `com.sec.android.app.sbrowser` | 30.0.0.67, 30.1.0.67, 31.0.0.64, 31.0.2.39 |
 | Beta 版 | `com.sec.android.app.sbrowser.beta` | 30.0.0.67 |
 
 模块通过运行时自适应解析混淆类名/方法名，通常浏览器更新后无需更新模块即可自动适配。
