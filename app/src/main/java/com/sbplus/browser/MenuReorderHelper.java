@@ -162,7 +162,9 @@ public final class MenuReorderHelper {
                 float ry = ev.getRawY();
                 ensureFlatItems();
                 // Tap on the trailing "+" add cell -> open the add dialog.
-                int addPos = (sItems != null) ? sItems.size() : -1;
+                // 2026-11-21：「添加」项由 menu.add(0, ADD_ITEM_ID, 0, "添加") 创建，
+                // order=0 所以排在**第一位**（pos 0），不是末尾。
+                int addPos = 0;
                 if (addPos >= 0 && isTapOnPosition(rx, ry, addPos)) {
                     MainModule.logMsg("[SBPlus] add cell tapped -> show add dialog");
                     MenuAddButtonHelper.showAddDialog(((View) sRecycler).getContext());
@@ -370,8 +372,9 @@ public final class MenuReorderHelper {
     }
 
     /** True if the adapter position is the trailing "+" add cell (not a real icon). */
+    /** 「添加」格在 pos 0（由 menu.add 的 order=0 决定，2026-11-21）。 */
     private static boolean isAddCell(int pos) {
-        return sItems != null && pos == sItems.size();
+        return pos == 0;
     }
 
     /** True if the raw coords land on the item at the given adapter position. */

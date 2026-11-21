@@ -268,6 +268,19 @@ public class MainActivity extends Activity {
             startActivity(new Intent(MainActivity.this, LogManagerActivity.class));
         });
 
+        // 2026-11-19 新增：免 root 打补丁入口。
+        // 用 SAF 选 APK（ACTION_OPEN_DOCUMENT），选完交给 PatchFlow 处理。
+        Button patchBtn = findViewById(R.id.btn_patch_apk);
+        if (patchBtn != null) {
+            patchBtn.setOnClickListener(v -> {
+                // 2026-11-19：改成独立页面。打补丁是多步骤长流程（选 APK → 选补丁 →
+                // 选模式 → 跑几分钟 → 装），塞在主界面里状态难管，
+                // 也容易让 MainActivity 变成巨型类。
+                startActivity(new Intent(MainActivity.this,
+                        com.sbplus.browser.patcher.PatchActivity.class));
+            });
+        }
+
         // 启动时静默检测更新（只提示，不弹窗）
         checkUpdate(false);
     }
@@ -338,4 +351,5 @@ public class MainActivity extends Activity {
         b.setNegativeButton("取消", null);
         b.show();
     }
+
 }

@@ -65,3 +65,13 @@ tmp_jar_extract/
 # 本地验证脚本(临时编译运行的小程序,不属于源码)
 _verify*/
 _verify*/*.class
+# 2026-11-22 上传前补充
+# MainHook.java 事故备份（1.7MB 单行损坏文件，仅本地留档，不入库）
+MainHook.java.broken-*
+# 未使用的 build-tools 原版 apksigner（含 org.conscrypt，禁止使用；实际用 apksig-only.jar）
+app/libs/apksigner.jar
+# 本地构建中间目录
+_build/
+_tools/
+# 旧构建脚本备份
+app/build.gradle.bak-*

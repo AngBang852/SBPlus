@@ -195,6 +195,47 @@
                 android:stateListAnimator="@null" />
         </LinearLayout>
 
+        <!-- ========== 卡片 2.5：免 root 打补丁（2026-11-19 新增）==========
+             定位：给没有 root / LSPosed 的设备另一条路 ——
+             直接在本地对 APK 做字节码修改，产出可安装的修改版。 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="免 root 打补丁"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="选择三星浏览器的原始 APK，在本地打上补丁并签名，产出可直接安装的修改版。全程离线，APK 不会离开设备。"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="3dp" />
+
+            <Button
+                android:id="@+id/btn_patch_apk"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="12dp"
+                android:text="选择 APK 并打补丁"
+                android:textAllCaps="false"
+                android:textColor="@color/brand"
+                android:textSize="14sp"
+                android:background="@drawable/bg_btn_secondary"
+                android:stateListAnimator="@null" />
+        </LinearLayout>
+
         <!-- ========== 卡片 3：项目与反馈 ========== -->
         <LinearLayout
             android:layout_width="match_parent"

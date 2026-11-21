@@ -3,6 +3,18 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 2026-11-20 新增：安装产出的 APK 需要它。
+         缺这个权限时 PackageInstaller.commit() 直接失败（连安装确认界面都不会弹），
+         表现为「点安装没反应」。用户还需在系统设置里为本应用打开「安装未知应用」。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- 2026-11-19：产物输出到公共下载目录 /sdcard/Download/SBPlus/。
+         Android 10+ 走 MediaStore 不需要权限；API 26-28 需要 WRITE_EXTERNAL_STORAGE。
+         maxSdkVersion=28 让它在更高版本上不申请（避免用户看到无意义的权限项）。 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <!-- 日志写入用签名级权限:只有与模块同签名的 APK 才能调用 LogProvider。
          浏览器进程内的 hook 通过 ContentResolver 访问 provider —— 它属于三星浏览器
          (不同 UID、不同签名),但 ContentResolver 调用走的是"调用方进程的权限",
@@ -53,6 +65,27 @@
             android:name=".LogProvider"
             android:authorities="com.sbplus.browser.log"
             android:exported="true" />
+
+        <!-- 2026-11-19：安装 APK 改用 PackageInstaller，不再需要 FileProvider。
+             （androidx.core 会注册 CoreComponentFactory，导致 LogProvider 加载失败、
+              app 启动即崩 —— 实测踩过。）这里只留安装结果接收器。 -->
+        <receiver
+            android:name=".patcher.InstallResultReceiver"
+            android:exported="false" />
+
+        <!-- 2026-11-19 新增：免 root 打补丁主入口 -->
+        <activity
+            android:name=".patcher.PatchActivity"
+            android:exported="true"
+            android:label="免 root 打补丁"
+            android:parentActivityName=".MainActivity" />
+        <!-- 2026-11-19 新增：将注入的功能子页（只读清单） -->
+        <activity
+            android:name=".patcher.PatchFeatureActivity"
+            android:exported="false"
+            android:label="将注入的功能"
+            android:parentActivityName=".patcher.PatchActivity" />
+
 
         <!-- Log manager UI -->
         <activity
