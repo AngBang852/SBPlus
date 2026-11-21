@@ -15,7 +15,7 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 
 1. **Download Bridge** — forward downloads to a third-party manager (customizable package), passing Cookie / UA / Referer; optionally block the native download.
 2. **Settings Integration + Logging** — inject an SBPlus submenu into browser settings, with a built-in log viewer.
-3. **Native Menu** — keeps the browser's native overflow list menu (the old grid-menu experiment has been retired).
+3. **Grid Menu** — turn the "More" menu into a multi-column grid, drag-to-reorder, add/remove icons. (LSPosed builds only; not available in the no-root patched build.)
 4. **Region Switch** — switch the browser region to one of 17 countries.
 5. **UA Spoofing** — fully replace the User-Agent (Desktop Chrome / Mobile / iPhone / custom).
 6. **Streamlined Settings** — master switch + multi-select hiding for unneeded items.
@@ -117,8 +117,8 @@ Re-resolution happens on every browser start, so after a browser update the modu
 ### 2. 设置集成 + 日志
 浏览器设置页注入 SBPlus 子菜单，内置日志查看。
 
-### 3. 原生菜单
-「更多」菜单保持系统原生列表（网格菜单实验已下线）。
+### 3. 网格菜单
+「更多」菜单改多列网格，拖拽排序、添加/删除图标。（仅 LSPosed 版；免 root 补丁版不提供）
 
 ### 4. 改区
 切换浏览器地区到 17 国之一。

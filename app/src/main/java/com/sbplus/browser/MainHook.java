@@ -26155,12 +26155,15 @@ private static boolean showMediaDialog(String json) {
     }
 
     private static void hookMoreMenuGrid(ClassLoader cl) {
-        // 2026-11-22 按用户决定停用网格菜单：
-        // 浏览器原版「更多」菜单就是**竖排列表**，网格样式是本模块自己加的；
-        // 在补丁版（Pine）下点击链路走不通（PosterView/ViewHolder 复用导致
-        // setOnClickListener 挂不到正确实例），因此保持浏览器原生列表样式。
-        MainModule.logMsg("[SBPlus] more-menu-grid DISABLED (native list menu kept)");
-        if (true) return;
+        // 2026-11-22：网格菜单只在**补丁版（Pine）**下停用。
+        // 浏览器原版「更多」菜单就是竖排列表，网格样式是本模块自己加的；
+        // 在补丁版下点击链路走不通（PosterView/ViewHolder 复用导致
+        // setOnClickListener 挂不到正确实例），因此补丁版保持浏览器原生列表样式。
+        // LSPosed 版保留网格功能（设置页的「启用网格菜单」开关也只对 LSPosed 显示）。
+        if (isPatchRuntime()) {
+            MainModule.logMsg("[SBPlus] more-menu-grid DISABLED (patch runtime, native list kept)");
+            return;
+        }
         final String handlerCls = "com.sec.android.app.sbrowser.toolbar.MoreMenuHandler";
         Class<?> moreMenuHandler;
         try {
