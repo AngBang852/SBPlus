@@ -80,19 +80,10 @@ public final class PatchEngine {
             log.log("✓ 已验证版本 " + info.versionName);
         }
 
-        // ③ 共存版先改包名（ARSCLib 直接改二进制 arsc，不经过 aapt2）
+        // ③ 只支持原包名：直接以源 APK 为底包。
+        //    （共存版 2026-11-22 移除：能装但启动崩在 dex 硬编码的
+        //      MostVisitedSitesProvider authority，manifest 改不动。）
         File base = config.sourceApk;
-        if (config.mode == PatchConfig.Mode.COEXIST) {
-            config.report("package", "改包名（ARSCLib）…", 20);
-            String newPkg = config.coexistPackage;
-            if (newPkg == null || newPkg.length() == 0) {
-                throw new IOException("共存版包名为空");
-            }
-            File renamed = new File(work, "renamed.apk");
-            ArscEditor.renamePackage(config.sourceApk, renamed, newPkg, config.appLabel);
-            log.log("包名改为: " + newPkg);
-            base = renamed;
-        }
 
         // ④ 注入运行时（dex + so + provider）
         config.report("inject", "注入 SBPlus 运行时…", 45);

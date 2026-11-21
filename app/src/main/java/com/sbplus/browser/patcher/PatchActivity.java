@@ -107,6 +107,12 @@ public class PatchActivity extends Activity {
                 + "整包注入三星浏览器的原始 APK，重签名后安装。"
                 + "注入后的浏览器拥有与 LSPosed 版完全一致的 "
                 + FeatureCatalog.count() + " 个功能。全程在本机完成，APK 不会上传。"));
+        // 2026-11-22 审查 S1：把"证书是本机生成的"这件事讲清楚 ——
+        // 用户换设备/重装模块后证书会变，届时需要用新产物覆盖安装（或卸载重装）。
+        TextView signNote = text("签名证书在本机首次使用时生成，每台设备各不相同；"
+                + "私钥不随模块包分发，第三方无法伪造同证书的更新。", 11, C_TEXT3, false);
+        signNote.setPadding(0, dp(10), 0, 0);
+        intro.addView(signNote);
         root.addView(intro);
 
         // ② 版本 + 选 APK（同一行）
@@ -290,6 +296,11 @@ public class PatchActivity extends Activity {
         }
 
         // API 29+：走 MediaStore。
+        //
+        // 2026-11-22 审查 L3：insert 成功、写入失败时必须把那条 pending 记录删掉，
+        // 否则下载目录里会残留一个 0 字节、对其它应用不可见的隐藏条目。
+        final android.content.ContentResolver cr = getContentResolver();
+        Uri item = null;
         try {
             android.content.ContentValues values = new android.content.ContentValues();
             values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, displayName);
@@ -299,9 +310,8 @@ public class PatchActivity extends Activity {
                     Environment.DIRECTORY_DOWNLOADS + "/" + OUT_DIR_NAME);
             values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1);
 
-            android.content.ContentResolver cr = getContentResolver();
             Uri collection = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI;
-            Uri item = cr.insert(collection, values);
+            item = cr.insert(collection, values);
             if (item == null) return null;
 
             java.io.InputStream in = new java.io.FileInputStream(src);
@@ -334,6 +344,12 @@ public class PatchActivity extends Activity {
             cr.update(item, done, null, null);
             return item;
         } catch (Throwable t) {
+            if (item != null) {
+                try {
+                    cr.delete(item, null, null);
+                } catch (Throwable ignored) {
+                }
+            }
             return null;
         }
     }
@@ -474,14 +490,13 @@ public class PatchActivity extends Activity {
                         throw new java.io.IOException("无法创建输出目录: " + outDir);
                     }
 
-                    // ② keystore 准备（首次要复制 assets 里的文件）
-                    final File keystore = ensureKeystore();
+                    // ② 签名身份（首次使用时在本机生成；私钥不随模块 APK 分发）
+                    final SelfSignedKeystore.Identity signing = ensureSigning();
 
                     final PatchConfig cfg = new PatchConfig(
                             PatchActivity.this, src, work, out,
-                            PatchConfig.Mode.SAME_PACKAGE,
-                            null, "SBPlus 浏览器", keystore,
-                            "sbpluspatch", "sbpluspatch", "sbpluspatch");
+                            signing.keystore,
+                            signing.storePass, signing.alias, signing.keyPass);
                     cfg.listener = new PatchConfig.ProgressListener() {
                         @Override
                         public void onProgress(String stage, String detail, int percent) {
@@ -504,7 +519,7 @@ public class PatchActivity extends Activity {
                     ui.post(new Runnable() {
                         @Override
                         public void run() {
-                            onDone(out);
+                            onDone(out, signing);
                         }
                     });
                 } catch (final Throwable t) {
@@ -531,15 +546,53 @@ public class PatchActivity extends Activity {
         tvLog.setText(sb.toString());
     }
 
-    private void onDone(final File apk) {
+    /**
+     * 注入完成。
+     *
+     * <p><b>2026-11-22 审查 H1 修复</b>：原实现在这里（UI 线程）直接调
+     * {@link #exportToDownloads}，把 300MB 级产物同步复制到公共下载目录。
+     * 这与 2026-11-20 刚修过的"安装写 300MB 占主线程"是同一类问题 ——
+     * 表现是注入完成后界面冻住数秒到十余秒，低端机直接 ANR。
+     * 现在只把"导出中"卡片刷上去，复制放后台线程，完成后再回 UI 渲染结果。
+     */
+    private void onDone(final File apk, final SelfSignedKeystore.Identity signing) {
         btnRun.setEnabled(true);
         tvProgress.setTextColor(C_OK);
         tvProgress.setText("完成");
         resultWrap.setVisibility(View.VISIBLE);
         resultWrap.removeAllViews();
 
-        // 导出到公共下载目录（/sdcard/Download/SBPlus/），失败就只报私有路径。
-        final Uri exported = exportToDownloads(apk, apk.getName());
+        LinearLayout wait = card();
+        wait.addView(label("产物"));
+        TextView tip = body("正在导出到下载目录…（" + mbText(apk) + "，完成后显示路径）");
+        tip.setPadding(0, dp(8), 0, 0);
+        wait.addView(tip);
+        resultWrap.addView(wait);
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final Uri exported = exportToDownloads(apk, apk.getName());
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        showResult(apk, exported, signing);
+                    }
+                });
+            }
+        }, "sbpatch-export").start();
+    }
+
+    private static String mbText(File f) {
+        return String.format(java.util.Locale.US, "%.1f MB", f.length() / 1024.0 / 1024.0);
+    }
+
+    /** 渲染产物卡片（导出完成后在 UI 线程调用）。 */
+    private void showResult(final File apk, final Uri exported,
+                            final SelfSignedKeystore.Identity signing) {
+        resultWrap.removeAllViews();
+
+        // 导出成功就报公共路径（/sdcard/Download/SBPlus/），失败就只报私有路径。
         final String shownPath = exported != null && "file".equals(exported.getScheme())
                 ? exported.getPath()
                 : (exported != null
@@ -552,10 +605,15 @@ public class PatchActivity extends Activity {
         path.setPadding(0, dp(8), 0, dp(4));
         path.setTextIsSelectable(true);
         card.addView(path);
-        card.addView(text(String.format(java.util.Locale.US, "%.1f MB",
-                apk.length() / 1024.0 / 1024.0), 11, C_TEXT3, false));
+        card.addView(text(mbText(apk), 11, C_TEXT3, false));
         if (exported == null) {
             card.addView(text("（导出到下载目录失败，产物在应用私有目录里）",
+                    11, C_WARN, false));
+        }
+        // 2026-11-22 审查 S1：让用户看得见"这次是用哪张证书签的"。
+        card.addView(text("签名：" + signing.describe(), 11, C_TEXT3, false));
+        if (signing.legacy) {
+            card.addView(text("沿用旧版公开证书以保持可覆盖升级；卸载重装后可切到本机随机证书。",
                     11, C_WARN, false));
         }
 
@@ -738,26 +796,19 @@ public class PatchActivity extends Activity {
         return out;
     }
 
-    private File ensureKeystore() throws Exception {
-        File f = new File(getFilesDir(), "patch.keystore");
-        if (f.isFile() && f.length() > 0) return f;
-        java.io.InputStream in = getAssets().open("patch.keystore");
-        java.io.OutputStream os = new java.io.FileOutputStream(f);
-        try {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
-        } finally {
-            try {
-                in.close();
-            } catch (Throwable ignored) {
-            }
-            try {
-                os.close();
-            } catch (Throwable ignored) {
-            }
-        }
-        return f;
+    /**
+     * 取得签名身份（2026-11-22 审查 S1 修复）。
+     *
+     * <p>原实现把一张<b>固定的私钥</b>打包在 {@code assets/patch.keystore} 里、
+     * 口令硬编码在源码中。任何拿到模块 APK 的人都能解出它，从而签出与用户已装
+     * 补丁版浏览器同证书的包 —— Android 的更新校验只看证书，等于把"伪造更新"
+     * 的能力公开分发。
+     *
+     * <p>现在改为：首次使用时<b>在本机生成</b>密钥对与自签证书，存进应用私有目录；
+     * 私钥不再随 APK 分发。详见 {@link SelfSignedKeystore}。
+     */
+    private SelfSignedKeystore.Identity ensureSigning() throws Exception {
+        return SelfSignedKeystore.obtain(getFilesDir());
     }
 
     private LinearLayout card() {

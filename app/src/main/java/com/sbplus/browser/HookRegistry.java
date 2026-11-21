@@ -236,6 +236,13 @@ final class HookRegistry {
             if (orig == null) continue;   // 无原实现可恢复（旧版本登记的 handle）
             try {
                 XposedInterface.HookHandle nh = h.replaceHook(orig);
+                // 2026-11-22 审查 M2：Pine 实现替换失败时返回 null（不再抛异常），
+                // 这里必须判空，否则 null 会进 updated 列表、后续遍历 NPE。
+                if (nh == null) {
+                    android.util.Log.w("SBPlus", "replaceHook(restore) returned null, keep old");
+                    updated.add(h);
+                    continue;
+                }
                 updated.add(nh);
                 HOOKER_BY_HANDLE.remove(h);
                 HOOKER_BY_HANDLE.put(nh, orig);

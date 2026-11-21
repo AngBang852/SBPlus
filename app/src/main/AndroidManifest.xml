@@ -73,10 +73,16 @@
             android:name=".patcher.InstallResultReceiver"
             android:exported="false" />
 
-        <!-- 2026-11-19 新增：免 root 打补丁主入口 -->
+        <!-- 2026-11-19 新增：免 root 打补丁主入口。
+            2026-11-22 审查 H2：改为 exported="false"。
+            原先是 true，且 Activity 入口没有任何调用方校验 —— 任意第三方应用都能
+            直接把这个"选 APK → 签名 → 引导安装"的界面推到用户面前，配合本模块的
+            REQUEST_INSTALL_PACKAGES 可被用于诱导安装链（用户看到的是他信任的
+            SBPlus 界面）。唯一入口是 MainActivity 的「免 root 打补丁」按钮，
+            不需要外部唤起。 -->
         <activity
             android:name=".patcher.PatchActivity"
-            android:exported="true"
+            android:exported="false"
             android:label="免 root 打补丁"
             android:parentActivityName=".MainActivity" />
         <!-- 2026-11-19 新增：将注入的功能子页（只读清单） -->

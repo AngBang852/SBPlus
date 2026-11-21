@@ -215,7 +215,12 @@ public final class PineXposedImpl implements XposedInterface {
                         frame.setThrowable(t);
                         return;
                     }
-                    if (!chain.proceeded) {
+                    if (chain.resultSet) {
+                        // proceedWith(result)：不调用原方法，直接以 result 作为返回值。
+                        // 2026-11-22 审查 M1 修复：原实现把 proceeded 置 true 却从不
+                        // 写 frame 结果，导致"替换返回值"类 hook 静默失效、原方法照跑。
+                        frame.setResult(chain.replacement);
+                    } else if (!chain.proceeded) {
                         frame.setResult(result);
                     }
                 }
@@ -241,6 +246,10 @@ public final class PineXposedImpl implements XposedInterface {
         private final Pine.CallFrame frame;
         /** 原方法是否已经执行过（决定异常该上抛还是转成方法抛出）。 */
         boolean proceeded;
+        /** proceedWith(result) 是否设置了替换返回值（此时不应再执行原方法）。 */
+        boolean resultSet;
+        /** 替换返回值。 */
+        Object replacement;
 
         PineChain(Executable executable, Pine.CallFrame frame) {
             this.executable = executable;
@@ -284,7 +293,11 @@ public final class PineXposedImpl implements XposedInterface {
 
         @Override
         public Object proceedWith(Object result) throws Throwable {
-            proceeded = true;
+            // 2026-11-22 审查 M1 修复：语义是"不调用原方法，直接返回 result"。
+            // 不能只把 proceeded 置 true —— 那会让 beforeCall 认为"原方法已跑"，
+            // 于是既不写 frame 结果、又放行原方法，result 被静默丢弃。
+            resultSet = true;
+            replacement = result;
             return result;
         }
 
@@ -312,12 +325,18 @@ public final class PineXposedImpl implements XposedInterface {
         private final String id;
         private final ExceptionMode mode;
         private final int priority;
-        private volatile MethodHook.Unhook unhook;
+        /**
+         * 2026-11-22 审查 M2：改为 AtomicReference。
+         * 原实现是 volatile 字段 + 判空后调用，两个线程同时 unhook 会各拿到同一个实例、
+         * 各自调一次 {@code u.unhook()}（Pine 的 Unhook 不保证可重入）。
+         * getAndSet(null) 保证"只有第一个调用者真正执行"。
+         */
+        private final java.util.concurrent.atomic.AtomicReference<MethodHook.Unhook> unhookRef;
 
         PineHookHandle(Executable executable, MethodHook.Unhook unhook,
                        String id, ExceptionMode mode, int priority) {
             this.executable = executable;
-            this.unhook = unhook;
+            this.unhookRef = new java.util.concurrent.atomic.AtomicReference<MethodHook.Unhook>(unhook);
             this.id = id;
             this.mode = mode;
             this.priority = priority;
@@ -335,26 +354,54 @@ public final class PineXposedImpl implements XposedInterface {
 
         @Override
         public void unhook() {
-            MethodHook.Unhook u = unhook;
-            if (u != null) {
-                try {
-                    u.unhook();
-                } catch (Throwable t) {
-                    Log.w(TAG, "unhook failed: " + executable, t);
-                }
+            MethodHook.Unhook u = unhookRef.getAndSet(null);
+            if (u == null) {
+                return;   // 已经撤过：幂等，不重复调用
+            }
+            try {
+                u.unhook();
+            } catch (Throwable t) {
+                Log.w(TAG, "unhook failed: " + executable, t);
             }
         }
 
+        /**
+         * 替换 hook 实现。
+         *
+         * <p><b>2026-11-22 审查 M2 修复</b>：原实现"先挂新的、再撤旧的"，理由写的是
+         * "避免中间出现无 hook 窗口"。但 Pine 没有 libxposed 的原子替换原语，
+         * 两种顺序只能二选一：
+         * <ul>
+         *   <li>先挂新→后撤旧：窗口内<b>两条 hook 都会执行</b>。用于"恢复原实现"时，
+         *       原逻辑会跑两遍 —— 重复拦截、重复写、重复弹窗，比短暂无 hook 更糟；</li>
+         *   <li>先撤旧→后挂新：窗口内无 hook，但只有微秒级，且<b>不会重复执行</b>。</li>
+         * </ul>
+         * 这里选后者。替换失败时返回 null（HookRegistry 会据此退回 unhook 路径），
+         * 并把旧引用还回，保证 handle 仍可用。
+         */
         @Override
         public HookHandle replaceHook(Hooker hooker) {
-            // 先挂新的再撤旧的，避免中间出现「无 hook」窗口。
-            HookHandle replacement = new PineHookBuilder(executable)
-                    .setPriority(priority)
-                    .setExceptionMode(mode)
-                    .setId(id)
-                    .intercept(hooker);
-            unhook();
-            return replacement;
+            MethodHook.Unhook old = unhookRef.getAndSet(null);
+            try {
+                HookHandle replacement = new PineHookBuilder(executable)
+                        .setPriority(priority)
+                        .setExceptionMode(mode)
+                        .setId(id)
+                        .intercept(hooker);
+                if (old != null) {
+                    try {
+                        old.unhook();
+                    } catch (Throwable t) {
+                        Log.w(TAG, "replaceHook: unhook old failed: " + executable, t);
+                    }
+                }
+                return replacement;
+            } catch (Throwable t) {
+                // 新 hook 没挂上：旧 hook 仍在生效（我们只是取走了引用），还回去。
+                unhookRef.set(old);
+                Log.w(TAG, "replaceHook failed: " + executable, t);
+                return null;
+            }
         }
     }
 

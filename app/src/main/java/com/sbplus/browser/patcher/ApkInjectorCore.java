@@ -51,6 +51,11 @@ public final class ApkInjectorCore {
         AndroidManifestBlock manifest = new AndroidManifestBlock();
         manifest.readBytes(new ByteArrayInputStream(rawManifest));
 
+        // 2026-11-22：共存版移除后，authority 固定为默认值即可。
+        // （历史：曾按目标包名生成不同 authority 以支持共存版；该路线因
+        //  dex 硬编码 provider authority 导致启动崩溃，已整体放弃。）
+        String authority = PROVIDER_AUTHORITY;
+
         ResXmlElement root = manifest.getDocumentElement();
         if (root == null) {
             throw new IOException("manifest 没有根元素");
@@ -65,8 +70,14 @@ public final class ApkInjectorCore {
         }
         if (hasProvider(application)) {
             // 幂等：已注入过就不重复加（重复 provider 会让安装失败）。
+            //
+            // 2026-11-22 真机链路修复（M8 续）：但 authority 必须校正为「当前目标包名」
+            // 对应的值。实测场景：源 APK 本身就是设备上的补丁版（已含 provider，
+            // authority=com.sbplus.browser.patchinit），把它改名做共存版后，
+            // 旧 authority 会与原版冲突 → INSTALL_FAILED_CONFLICTING_PROVIDER。
+            fixProviderAuthority(application, authority);
         } else {
-            addProvider(application);
+            addProvider(application, authority);
         }
 
         // 关键：改完必须 refreshFull()。
@@ -105,7 +116,86 @@ public final class ApkInjectorCore {
             } catch (Throwable ignored) {
             }
         }
-        return bos.toByteArray();
+        return forceProviderEnabled(bos.toByteArray());
+    }
+
+    /** 找出已有的 PatchInitProvider，把 authority 校正为目标值并确保 enabled=true。 */
+    static void fixProviderAuthority(ResXmlElement application, String authority) {
+        for (ResXmlElement p : application.listElements("provider")) {
+            ResXmlAttribute name = p.searchAttribute(NS_ANDROID, "name");
+            if (name == null || !PROVIDER_CLASS.equals(name.getValueAsString())) continue;
+            ResXmlAttribute auth = p.getOrCreateAndroidAttribute("authorities", 0x01010018);
+            if (!authority.equals(auth.getValueAsString())) {
+                auth.setValueAsString(authority);
+            }
+            ResXmlAttribute enabled = p.getOrCreateAndroidAttribute("enabled", 0x0101000e);
+            enabled.setValueType(com.reandroid.arsc.value.ValueType.BOOLEAN);
+            enabled.setData(0xFFFFFFFF);
+        }
+    }
+
+    /**
+     * 二次修复：确保注入的 provider 是 {@code android:enabled=true}。
+     *
+     * <p><b>2026-11-22 真机链路修复（关键）</b>：ARSCLib 写回 binary XML 时会给新建
+     * 的 {@code <provider>} 自动补一个 {@code enabled} 属性，但补的值取决于输入
+     * manifest 的来源：
+     * <ul>
+     *   <li>原始 manifest → {@code data=0xFFFFFFFF}（true，正确）；</li>
+     *   <li>被改名工具（已移除的共存版流程）重写过的 manifest → {@code data=0}
+     *       （false，错误）。</li>
+     * </ul>
+     * provider 被写成 disabled 时系统<b>完全不会实例化它</b> —— PatchBootstrap
+     * 不执行、Pine 不初始化，表现为"装上了但所有功能都不生效"。
+     *
+     * <p>而"再读一遍、把 enabled 改成 true、写回"是有效的：实测读回后
+     * {@code data=-1} 保持稳定（ARSCLib 只在首次补该属性时按上下文取默认值，
+     * 已存在的属性不会被覆盖）。所以这里在 patchManifest 输出后再走一遍。
+     *
+     * <p>注意不能只调用 {@code setValueAsBoolean(true)}：实测对新建属性无效
+     * （写回仍是 0），必须显式设置 {@code ValueType.BOOLEAN + data=0xFFFFFFFF}。
+     */
+    static byte[] forceProviderEnabled(byte[] manifestBytes) throws IOException {
+        AndroidManifestBlock manifest = new AndroidManifestBlock();
+        manifest.readBytes(new ByteArrayInputStream(manifestBytes));
+        boolean changed = false;
+        for (ResXmlElement app : manifest.getDocumentElement().listElements("application")) {
+            for (ResXmlElement p : app.listElements("provider")) {
+                ResXmlAttribute name = p.searchAttribute(NS_ANDROID, "name");
+                if (name == null || !PROVIDER_CLASS.equals(name.getValueAsString())) continue;
+                ResXmlAttribute enabled =
+                        p.getOrCreateAndroidAttribute("enabled", 0x0101000e);
+                if (enabled.getData() != -1) {   // int: -1 == 0xFFFFFFFF == true
+                    enabled.setValueType(com.reandroid.arsc.value.ValueType.BOOLEAN);
+                    enabled.setData(0xFFFFFFFF);
+                    changed = true;
+                }
+            }
+        }
+        if (!changed) return manifestBytes;
+        manifest.refreshFull();
+        File tmp = File.createTempFile("sbplus-manifest-fix", ".xml");
+        try {
+            manifest.writeBytes(tmp);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream((int) tmp.length());
+            InputStream in = new FileInputStream(tmp);
+            try {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            } finally {
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            return bos.toByteArray();
+        } finally {
+            try {
+                if (!tmp.delete()) tmp.deleteOnExit();
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     /** 判断是否已经有本模块的 provider。 */
@@ -125,7 +215,7 @@ public final class ApkInjectorCore {
      * <p>{@code android:initOrder=1000} 让它尽量早于其它 provider 初始化 ——
      * hook 越早装好，能拦到的浏览器初始化路径就越完整。
      */
-    static void addProvider(ResXmlElement application) {
+    static void addProvider(ResXmlElement application, String authority) {
         ResXmlElement provider = application.newElement("provider");
 
         ResXmlAttribute name = provider.getOrCreateAndroidAttribute("name", 0x01010003);
@@ -133,20 +223,39 @@ public final class ApkInjectorCore {
 
         ResXmlAttribute authorities =
                 provider.getOrCreateAndroidAttribute("authorities", 0x01010018);
-        authorities.setValueAsString(PROVIDER_AUTHORITY);
+        authorities.setValueAsString(authority);
 
         ResXmlAttribute exported =
                 provider.getOrCreateAndroidAttribute("exported", 0x01010010);
         exported.setValueAsBoolean(false);
 
-        ResXmlAttribute enabled =
-                provider.getOrCreateAndroidAttribute("enabled", 0x0101000e);
-        enabled.setValueAsBoolean(true);
+        // 2026-11-22 真机链路修复：这里原本还有一行
+        //   enabled.setValueAsBoolean(true);
+        // 但实测（aapt2 dump xmltree 产物）该属性被写成了 false —— ARSCLib 对
+        // 新建的 binary-XML 属性调 setValueAsBoolean(true) 后 data 仍是 0，
+        // 结果 provider 被系统判定为 disabled、根本不会实例化，Pine 也就不启动。
+        // <provider> 的 android:enabled 默认就是 true，**不写最稳**，故删掉这行。
 
         ResXmlAttribute initOrder =
                 provider.getOrCreateAndroidAttribute("initOrder", 0x0101001a);
         initOrder.setData(1000);
         initOrder.setValueType(com.reandroid.arsc.value.ValueType.DEC);
+
+        // 2026-11-22 真机链路修复（关键）：<provider> 的 android:enabled 必须显式为 true。
+        //
+        // 背景：ARSCLib 在写回 binary XML 时会给新建的 provider 自动补一个 enabled 属性，
+        // 但补的值取决于输入 manifest 的来源：
+        //   · 原始 manifest             → data=0xFFFFFFFF（true，正确）
+        //   · ArscEditor.renamePackage 重写过的 manifest → data=0（false）
+        // 共存版（先改名、后注入）正好踩中后者，结果 provider 被系统判定为 disabled、
+        // 不会实例化，PatchBootstrap 不执行、Pine 不初始化 —— 表现为"装上了但没有任何功能"。
+        //
+        // 注意不能只写 setValueAsBoolean(true)：实测对新建属性无效（写回仍是 0）。
+        // 必须显式同时设置 valueType 与 data。
+        ResXmlAttribute enabled =
+                provider.getOrCreateAndroidAttribute("enabled", 0x0101000e);
+        enabled.setValueType(com.reandroid.arsc.value.ValueType.BOOLEAN);
+        enabled.setData(0xFFFFFFFF);   // TYPE_INT_BOOLEAN: 非 0 即 true
     }
 
     /**

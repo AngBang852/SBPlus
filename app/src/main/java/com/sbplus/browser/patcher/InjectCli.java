@@ -17,34 +17,24 @@ import java.io.File;
  *   java -cp "classes;ARSCLib.jar" com.sbplus.browser.patcher.InjectCli \
  *        source.apk runtime.dex libpine.so out.apk
  * </pre>
+ *
+ * <p>2026-11-22：共存版（改包名）已移除，不再支持第 5 个"新包名"参数。
  */
 public final class InjectCli {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 4) {
-            System.err.println("用法: InjectCli <source.apk> <runtime.dex> <libpine.so> <out.apk>"
-                    + " [新包名]");
-            System.err.println("  给出第 5 个参数时走共存版（改包名）；否则原包名。");
+            System.err.println("用法: InjectCli <source.apk> <runtime.dex> <libpine.so> <out.apk>");
             System.exit(2);
         }
         File src = new File(args[0]);
         File dex = new File(args[1]);
         File so = new File(args[2]);
         File out = new File(args[3]);
-        String newPkg = args.length >= 5 ? args[4] : null;
 
         long t0 = System.currentTimeMillis();
 
-        // 共存版：先改包名（ARSCLib 直接改二进制 arsc，不经过 aapt2）
-        if (newPkg != null) {
-            System.out.println("[0/4] 改包名 → " + newPkg + " …");
-            File renamed = new File(out.getParentFile(), "renamed.apk");
-            ArscEditor.renamePackage(src, renamed, newPkg, "SBPlus 浏览器");
-            src = renamed;
-            System.out.println("      完成 " + (renamed.length() / 1024 / 1024) + " MB");
-        }
-
-        System.out.println("[1/4] 读 manifest…");
+        System.out.println("[1/3] 读 manifest…");
         byte[] raw = ApkInjectorCore.readEntry(src, "AndroidManifest.xml");
         if (raw == null) {
             System.err.println("FAIL: 源 APK 里没有 AndroidManifest.xml");
@@ -52,19 +42,19 @@ public final class InjectCli {
         }
         System.out.println("      原 manifest " + raw.length + " 字节");
 
-        System.out.println("[2/4] 改 manifest（插入 provider）…");
+        System.out.println("[2/3] 改 manifest（插入 provider）…");
         byte[] patched = ApkInjectorCore.patchManifest(raw);
         System.out.println("      新 manifest " + patched.length + " 字节 ("
                 + (patched.length - raw.length) + ")");
 
-        System.out.println("[3/4] 打包（保留条目顺序 + 对齐）…");
+        System.out.println("[3/3] 打包（保留条目顺序 + 对齐）…");
         String dexName = ApkInjectorCore.nextDexName(src);
         System.out.println("      新 dex 条目名: " + dexName);
         ApkInjectorCore.repack(src, out, patched, dexName, dex,
                 RuntimeInjector.SO_ENTRY, so);
 
         long ms = System.currentTimeMillis() - t0;
-        System.out.println("[4/4] 完成，用时 " + (ms / 1000) + "s");
+        System.out.println("完成，用时 " + (ms / 1000) + "s");
         System.out.println("      产物: " + out.getAbsolutePath()
                 + "  " + (out.length() / 1024 / 1024) + " MB");
     }
