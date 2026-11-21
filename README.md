@@ -15,7 +15,7 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 
 1. **Download Bridge** — forward downloads to a third-party manager (customizable package), passing Cookie / UA / Referer; optionally block the native download.
 2. **Settings Integration + Logging** — inject an SBPlus submenu into browser settings, with a built-in log viewer.
-3. **Grid Menu** — turn the "More" menu into a multi-column grid, drag-to-reorder, add/remove icons.
+3. **Native Menu** — keeps the browser's native overflow list menu (the old grid-menu experiment has been retired).
 4. **Region Switch** — switch the browser region to one of 17 countries.
 5. **UA Spoofing** — fully replace the User-Agent (Desktop Chrome / Mobile / iPhone / custom).
 6. **Streamlined Settings** — master switch + multi-select hiding for unneeded items.
@@ -35,6 +35,14 @@ A **LSPosed** module that enhances Samsung Internet Browser (package `com.sec.an
 3. Set scope to **Samsung Internet** (`com.sec.android.app.sbrowser`) or Beta (`com.sec.android.app.sbrowser.beta`).
 4. Restart the browser (or device).
 
+### No-root Patching (optional)
+
+The module also ships a built-in patcher: it injects the runtime into a stock Samsung Internet APK, re-signs it, and produces an installable APK — no root or LSPosed required.
+
+- Entry: **免 root 打补丁** in the module app.
+- A device-specific signing certificate is generated on first use; the private key is not shipped with the module.
+- Only the original package name is supported.
+
 ### Supported Versions
 
 | Channel | Package | Version |
@@ -48,7 +56,7 @@ The module resolves obfuscated class/method names at runtime, so it generally ad
 
 ```bat
 call <path-to-android-sdk>/env.bat
-gradle assembleDebug --no-daemon
+gradlew.bat assembleDebug --no-daemon
 ```
 
 Output: `app\build\outputs\apk\debug\app-debug.apk`
@@ -72,7 +80,7 @@ Re-resolution happens on every browser start, so after a browser update the modu
 
 - **目标框架：LSPosed**（基于 LSPosed 新 API `io.github.libxposed.api`，封装传统 Xposed 风格兼容层 `XC_MethodHook`）
 - 模块入口：`resources/META-INF/xposed/java_init.list` → `MainModule` → `MainHook`
-- 架构：`MainModule`（入口）→ `MainHook`（单核巨类，22 个功能隔离注册）+ 36 个辅助类
+- 架构：`MainModule`（入口）→ `MainHook`（单核巨类，22 个功能隔离注册）+ 30+ 个辅助类
 
 ### 使用前提
 
@@ -83,6 +91,14 @@ Re-resolution happens on every browser start, so after a browser update the modu
 3. 重启三星浏览器（或重启系统）
 
 > 作用域需要时可在 LSPosed 界面手动勾选。
+
+### 免 root 打补丁（可选）
+
+模块内置补丁器：把运行时注入三星浏览器原始 APK 并重签名，产出可直接安装的完整功能版，无需 root / LSPosed。
+
+- 入口：模块首页「免 root 打补丁」
+- 首次使用会在本机生成独立签名证书，私钥不随模块包分发
+- 只支持原包名模式
 
 ### 支持版本
 
@@ -101,8 +117,8 @@ Re-resolution happens on every browser start, so after a browser update the modu
 ### 2. 设置集成 + 日志
 浏览器设置页注入 SBPlus 子菜单，内置日志查看。
 
-### 3. 网格菜单
-「更多」菜单改多列网格，拖拽排序、添加/删除图标。
+### 3. 原生菜单
+「更多」菜单保持系统原生列表（网格菜单实验已下线）。
 
 ### 4. 改区
 切换浏览器地区到 17 国之一。
@@ -141,7 +157,7 @@ Re-resolution happens on every browser start, so after a browser update the modu
 
 ```bat
 call <path-to-android-sdk>\env.bat
-gradle assembleDebug --no-daemon
+gradlew.bat assembleDebug --no-daemon
 ```
 
 产物：`app\build\outputs\apk\debug\app-debug.apk`
