@@ -874,11 +874,18 @@ public final class MenuReorderHelper {
                 ((ViewGroup) rv).setClipToPadding(false);
             }
             int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
+            int added = 0, skippedPos = 0, skippedType = 0;
+            StringBuilder diag = new StringBuilder();
             for (int i = 0; i < childCount; i++) {
                 View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
-                if (child == null || !(child instanceof ViewGroup)) continue;
+                if (child == null || !(child instanceof ViewGroup)) { skippedType++; continue; }
                 int pos = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
-                if (pos < 0 || sItems == null || pos >= sItems.size()) continue;
+                if (pos < 0 || sItems == null || pos >= sItems.size()) {
+                    skippedPos++;
+                    if (diag.length() < 200) diag.append(" [i=").append(i).append(" pos=").append(pos)
+                            .append(" size=").append(sItems == null ? -1 : sItems.size()).append("]");
+                    continue;
+                }
                 // Block the original click while editing (and remember its clickable state).
                 child.setTag(TAG_KEY_CLICKABLE, Boolean.valueOf(child.isClickable()));
                 child.setClickable(false);
@@ -889,8 +896,11 @@ public final class MenuReorderHelper {
                 }
                 child.setTag(TAG_KEY_POSITION, pos);
                 addDeleteMark((ViewGroup) child, pos);
+                added++;
             }
-            MainModule.logMsg("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items");
+            MainModule.logMsg("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items"
+                    + " (children=" + childCount + " added=" + added
+                    + " skipType=" + skippedType + " skipPos=" + skippedPos + ")" + diag);
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] showDeleteMarks error: " + t);
         }
@@ -979,49 +989,30 @@ public final class MenuReorderHelper {
 
         int iconId = rc.getResources().getIdentifier("icon", "id", rc.getPackageName());
         View icon = iconId != 0 ? child.findViewById(iconId) : null;
+        // 2026-11-22 修复「部分格子没有 ✕」：
+        // 原实现先 addView，再用 setX/setY 把标记按**绝对坐标**挪到图标右上角。
+        // 但 pin 运行时 mark.getWidth() 往往还是 0（刚 add，尚未测量），
+        // 算出的 x = iconLeft + iconWidth - 0 会落到格子外面，被父容器裁掉 ——
+        // 表现为"标记加了但看不见"，且只在部分格子上出现（取决于布局时序）。
+        //
+        // 改为**纯布局规则**定位：ALIGN_PARENT_TOP + ALIGN_PARENT_END，
+        // 由 RelativeLayout 自己算，不依赖任何测量时序。
+        child.setClipChildren(false);
+        child.setClipToPadding(false);
         RelativeLayout.LayoutParams rlp = new RelativeLayout.LayoutParams(size, size);
         rlp.addRule(RelativeLayout.ALIGN_PARENT_TOP);
-        rlp.addRule(RelativeLayout.ALIGN_PARENT_START);
+        rlp.addRule(RelativeLayout.ALIGN_PARENT_END);
 
         child.addView(mark, rlp);
         mark.bringToFront();
+        // 用 margin 微调：右上角向内收一点点，避免压住图标边缘。
+        int inset = (int) (2f * d);
+        rlp.topMargin = inset;
+        rlp.rightMargin = inset;
+        mark.setLayoutParams(rlp);
 
-        // Wait until the icon is actually laid out (paged lazy layout means one post may not
-        // be enough), then pin the ✕ to the icon's top-right corner using absolute coords.
-        //
-        // 2026-10-04 修复:加重试上限。原实现 `child.post(this)` 无上限 —— 若该图标
-        // 因任何原因永不完成布局(被回收、不可见、parent 已 detach),就会以每帧一次的
-        // 频率无限重排队,且每次重试都打一条日志,形成持续的主线程开销与日志刷屏。
-        // 上限取 60 次(约 1 秒@60fps),足够覆盖懒布局场景,超限后安静放弃(✕ 会留在
-        // 默认位置,不影响其它功能)。
-        final int[] pinTries = new int[]{ 0 };
-        final Runnable pin = new Runnable() {
-            @Override public void run() {
-                try {
-                    if (++pinTries[0] > 60) {
-                        MainModule.logMsg("[SBPlus] mark pin gave up after " + pinTries[0] + " tries");
-                        return;
-                    }
-                    View ic = iconId != 0 ? child.findViewById(iconId) : null;
-                    if (ic == null || ic.getWidth() <= 0) { child.post(this); return; }
-                    int[] il = new int[2];
-                    ic.getLocationInWindow(il);
-                    int[] cl = new int[2];
-                    child.getLocationInWindow(cl);
-                    float iconLeft = il[0] - cl[0];
-                    float iconTop = il[1] - cl[1];
-                    float x = iconLeft + ic.getWidth() - mark.getWidth();
-                    float y = Math.max(0f, iconTop);
-                    mark.setX(x);
-                    mark.setY(y);
-                    // 注:定位成功是常态,原实现在这里每次都打一条日志 —— 编辑模式下
-                    // 每个图标各打一条,几十个图标就是几十行刷屏。移除。详见上方重试上限说明。
-                } catch (Throwable t) {
-                    MainModule.logMsg("[SBPlus] mark pin error: " + t);
-                }
-            }
-        };
-        child.post(pin);
+        // 2026-11-22：不再用绝对坐标 pin（依赖 mark 已测量，时序不稳会算出界被裁）。
+        // 位置由上面的 RelativeLayout 规则决定。
             mark.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     Integer p = (Integer) v.getTag();
