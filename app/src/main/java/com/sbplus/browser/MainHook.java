@@ -12764,6 +12764,24 @@ private static void showUaGroupDialog(final Context ctx) {
                     listener, 0);
             if (!(second instanceof Object)) return;
 
+            // 2026-11-22 关键修复：把「添加」项从**宿主 Menu** 里撤掉。
+            //
+            // <p><b>为什么必须撤</b>：addMenu 是宿主自己的 Menu 实例，往它里面 add()
+            // 会触发宿主的 menu-changed → notifyDataSetChanged → 宿主 adapter 用新
+            // 菜单重建 mPrimaryItems，于是多出我们这一项（图标为空）→ 用户看到
+            // 「添加按钮前面多出许多空位」；而且宿主条目数 +1 后，长按编辑时的
+            // 位置索引与 sItems 错位，滑动后部分格子拿不到 ✕ 标记。
+            //
+            // <p><b>为什么撤掉不影响第二个 adapter</b>：构造时它已经按传入的
+            // addItems 列表建立了自己的条目（MenuItem 对象仍被它持有），
+            // 宿主 Menu 里有没有这一项与它无关。
+            try {
+                addMenu.removeItem(ADD_ID);
+                MainModule.logMsg("[SBPlus] add item removed from host menu (de-polluted)");
+            } catch (Throwable trm) {
+                MainModule.logMsg("[SBPlus] removeItem failed: " + trm);
+            }
+
             // ④ ConcatAdapter 拼接
             Class<?> concatCls = findClassIfExists("androidx.recyclerview.widget.o", cl);
             if (concatCls == null) {

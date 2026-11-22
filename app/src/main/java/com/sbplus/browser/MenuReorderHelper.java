@@ -37,6 +37,20 @@ public final class MenuReorderHelper {
 
     private static volatile Object sRecycler;   // RecyclerView
     private static volatile Object sAdapter;    // MoreMenuRecyclerAdapter
+
+    /**
+     * 该 adapter 是否就是**宿主菜单的 adapter**（而不是我们拼进去的「添加」格 adapter）。
+     *
+     * <p><b>2026-11-22 为什么需要它</b>：添加格用 ConcatAdapter 实现 —— 第二个 adapter
+     * 是**同一个宿主 adapter 类**的另一个实例，它的 position 从 0 重新开始。
+     * 而我们的 onBindViewHolder hook 挂在**类**上，两个实例都会触发：
+     * 添加格的 pos=0 会被当成"第 0 个图标"，于是被画上 ✕、点击被禁用，
+     * 删除时还会删掉真正的第 0 项（用户看到"长按后滑动有些没有删除按钮"、
+     * "添加格前面多出空位"）。用实例比对即可精确区分。
+     */
+    static boolean isHostAdapter(Object a) {
+        return a != null && sAdapter != null && sAdapter == a;
+    }
     private static volatile Object sHandler;    // MoreMenuHandler (for mMenu + save)
     private static volatile List<MenuItem> sItems;   // flattened reorderable list
     private static volatile List<MenuItem> sCachedPrimary;
@@ -137,10 +151,65 @@ public final class MenuReorderHelper {
             MainHook.callMethod(recycler, "addOnItemTouchListener", sTouchProxy);
             sProxiedRecycler = recycler;
             MainModule.logMsg("[SBPlus] reorder touch proxy installed on " + recycler);
+
+            // 2026-11-22：编辑模式下滚动/翻页后，新绑定进来的格子没有 ✕ 标记
+            // （onBindViewHolder 只在绑定那一刻跑，滚动前就已绑好的格子不会再触发）。
+            // 这里挂一个滚动监听：滚动停止时把 ✕ 重新铺一遍。
+            // 用反射实现 OnScrollListener 接口，避免编译期依赖被 R8 改名的类。
+            try {
+                if (sScrollProxy == null) {
+                    java.lang.reflect.Method addScroll = null;
+                    for (java.lang.reflect.Method m : rvCls2(sCl).getMethods()) {
+                        if ("addOnScrollListener".equals(m.getName())
+                                && m.getParameterTypes().length == 1) {
+                            addScroll = m;
+                            break;
+                        }
+                    }
+                    if (addScroll != null) {
+                        final Class<?> ifc = addScroll.getParameterTypes()[0];
+                        sScrollProxy = Proxy.newProxyInstance(sCl, new Class<?>[]{ifc},
+                                new java.lang.reflect.InvocationHandler() {
+                            @Override public Object invoke(Object proxy, Method method, Object[] args) {
+                                try {
+                                    String name = method.getName();
+                                    // onScrollStateChanged(RecyclerView, int state)
+                                    if ("onScrollStateChanged".equals(name)
+                                            && args != null && args.length == 2) {
+                                        int state = ((Number) args[1]).intValue();
+                                        if (state == 0 && sEditMode) {   // SCROLL_STATE_IDLE
+                                            ((View) sRecycler).postDelayed(new Runnable() {
+                                                @Override public void run() {
+                                                    if (sEditMode) showDeleteMarks();
+                                                }
+                                            }, 60);
+                                        }
+                                    }
+                                    if ("toString".equals(name)) return "SBPlusScroll";
+                                    if ("hashCode".equals(name)) return System.identityHashCode(proxy);
+                                    if ("equals".equals(name)) return proxy == args[0];
+                                } catch (Throwable ignored) {}
+                                return null;
+                            }
+                        });
+                        MainHook.callMethod(recycler, "addOnScrollListener", sScrollProxy);
+                        MainModule.logMsg("[SBPlus] reorder scroll listener installed");
+                    }
+                }
+            } catch (Throwable ts) {
+                MainModule.logMsg("[SBPlus] scroll listener install failed: " + ts);
+            }
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] installTouchProxy error: " + t);
         }
     }
+
+    /** 取 RecyclerView 类（避免重复 loadClass）。 */
+    private static Class<?> rvCls2(ClassLoader cl) {
+        return MainHook.loadClassSafely("androidx.recyclerview.widget.RecyclerView", cl);
+    }
+
+    private static volatile Object sScrollProxy;
 
     private static boolean onIntercept(MotionEvent ev) {
         int action = ev.getActionMasked();
@@ -176,6 +245,24 @@ public final class MenuReorderHelper {
                 // In edit mode, a simple tap should NOT reach the item's onClick. Intercept it
                 // and route to our own ✕ / empty-space handling.
                 if (sEditMode) {
+                    // 2026-11-22 修复「编辑模式下滑动就退出编辑、✕ 全没了」：
+                    // 原来不区分 tap 与 swipe —— 横向滑动结束时 UP 落在图标之间的
+                    // 空白处，positionUnderRaw 返回 -1，于是被当成「点空白」直接
+                    // exitEditModeAndSave()。现在先按位移判断：真滑动就放行给
+                    // RecyclerView 滚动，并在滚动停止后重铺 ✕。
+                    float sdx = ev.getRawX() - sDownX;
+                    float sdy = ev.getRawY() - sDownY;
+                    if (sdx * sdx + sdy * sdy > 2500f) {   // >50px 视为滑动
+                        MainModule.logMsg("[SBPlus] UP in edit is swipe (dx=" + (int) sdx
+                                + "), keep edit mode");
+                        final View rvE = (View) sRecycler;
+                        rvE.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                if (sEditMode) showDeleteMarks();
+                            }
+                        }, 120);
+                        return false;   // 不吞事件，让 RecyclerView 完成滚动
+                    }
                     int underRaw = positionUnderRaw(rx, ry);
                     MainModule.logMsg("[SBPlus] UP in edit: underRaw=" + underRaw
                             + " hasMark=" + (hitRemoveMark(rx, ry) != null));

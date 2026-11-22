@@ -290,6 +290,9 @@ public final class MenuEditHelper {
                 MainHook.findAndHookMethodInHierarchy(adapterCls, "getItem", int.class,
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                            // 2026-11-22：只对宿主 adapter 生效（添加格 adapter 的 pos 从 0 起，
+                            // 若一并处理会把它的唯一项当成图标 0）。
+                            if (!MenuReorderHelper.isHostAdapter(p.thisObject)) return;
                             int pos = (Integer) p.args[0];
                             if (sIconCount >= 0 && pos >= sIconCount) {
                                 p.setResult(null); // "+" or filler -> no backing MenuItem
@@ -317,6 +320,11 @@ public final class MenuEditHelper {
                 new XC_MethodHook() {
                     @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
                         try {
+                            // 2026-11-22：只处理宿主 adapter 的绑定。
+                            // 添加格是同一个类的另一个实例（ConcatAdapter 的第二个），
+                            // 它的 pos 从 0 开始，若一并处理会被当成"第 0 个图标"
+                            // 画上 ✕ / 禁用点击 / 删除时删错项。
+                            if (!MenuReorderHelper.isHostAdapter(p.thisObject)) return;
                             int pos = (Integer) p.args[1];
                             Object holder = p.args[0];
                             int icons = sIconCount;
