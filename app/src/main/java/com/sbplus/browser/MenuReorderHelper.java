@@ -83,17 +83,7 @@ public final class MenuReorderHelper {
     public static void cacheRefs(Object handler, Object recycler, Object adapter,
                                  List<MenuItem> primary, List<MenuItem> secondary,
                                  List<MenuItem> removed) {
-        // 2026-10-04 修复:换新菜单时必须把上一轮的宿主 View 引用一并清掉。
-        // sRemoveMarks 是静态 Map<View,View>,值是挂在宿主菜单项上的「✕ 删除标记」。
-        // 原实现只重置了 sItems/sDragView,漏了它 —— 菜单 sheet 每次打开都会重建,
-        // 旧的 View 于是被静态 Map 长期持有(连带其 Activity/Window),浏览器常驻
-        // 进程里反复开关菜单会持续累积;分屏多实例时两套菜单还会互相干扰。
-        // 注意:必须在**赋值新引用之前**清理,否则清的是刚存进来的新值。
-        try {
-            synchronized (sRemoveMarks) {
-                sRemoveMarks.clear();
-            }
-        } catch (Throwable ignored) {}
+        // 2026-11-22：删除标记改为 Canvas 绘制（不再持有任何 View），无需清理。
         // 上一轮的触摸代理也要解绑:它持有的 sProxiedRecycler 是旧 RecyclerView,
         // 不清会导致 installTouchProxy 误判"已安装过"而不再挂到新实例上。
         sProxiedRecycler = null;
@@ -199,6 +189,8 @@ public final class MenuReorderHelper {
             } catch (Throwable ts) {
                 MainModule.logMsg("[SBPlus] scroll listener install failed: " + ts);
             }
+            // 2026-11-22：安装 ✕ 的 Canvas 绘制器（不新增 View，不参与布局）。
+            try { installMarkRenderer(recycler, sCl); } catch (Throwable ignoredMr) {}
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] installTouchProxy error: " + t);
         }
@@ -852,77 +844,130 @@ public final class MenuReorderHelper {
     }
 
     // ---------------------------------------------------------------------------------
-    // ✕ delete marks (shown while in edit mode).
+    // ---------------------------------------------------------------------------------
+    // ✕ delete marks (shown while in edit mode) —— 2026-11-22 改为 Canvas 直接绘制
+    //
+    // <p><b>为什么不再给每个格子加 View</b>：菜单格子的 itemView 是 LinearLayout
+    // （只有 icon + text 两行）。往里 addView 一个 TextView：
+    // <ul>
+    //   <li>用 RelativeLayout.LayoutParams → 布局时 ClassCastException 直接闪退；</li>
+    //   <li>用 LinearLayout.LayoutParams → 挤占容器布局，图标被推走/标记被裁，
+    //       表现为"部分格子没有 ✕"；</li>
+    //   <li>ViewOverlay 仍然受宿主 View 边界裁剪，同样只有部分可见。</li>
+    // </ul>
+    //
+    // <p>正解：在 RecyclerView 的 dispatchDraw 之后用 Canvas 直接画 ——
+    // 不新增任何 View、不参与测量布局、不受子 View 裁剪影响，一页统一绘制。
     // ---------------------------------------------------------------------------------
 
-    // 2026-11-22：删除标记改用 **ViewOverlay + Drawable** 绘制，彻底不碰宿主 itemView 的布局。
-    //
-    // <p>为什么换：原实现往 itemView 里 addView 一个 TextView：
-    // <ul>
-    //   <li>若容器是 LinearLayout，却用 RelativeLayout.LayoutParams → 布局时
-    //       ClassCastException 直接闪退（真机崩溃栈确认）；</li>
-    //   <li>换成正确类型的 LayoutParams 又会挤占容器布局（图标被推走/标记被裁），
-    //       表现为"部分格子没有 ✕"。</li>
-    // </ul>
-    // ViewOverlay 画在 View 内容之上，不参与测量和布局，也没有任何 LayoutParams 参与 ——
-    // 既不会崩，也不会挤动图标。
-    private static final java.util.Map<View, MarkDrawable> sRemoveMarks =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 已安装绘制 hook 的 RecyclerView 实例（避免重复挂）。 */
+    private static volatile Object sMarkRendererRecycler;
+    private static volatile boolean sMarkRendererHooked;
 
-    /** 红色圆形 + 白色 ✕ 的删除标记。 */
-    private static final class MarkDrawable extends android.graphics.drawable.Drawable {
-        private final android.graphics.Paint mBg =
-                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.Paint mFg =
-                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        final int pos;
-
-        MarkDrawable(int pos, float density) {
-            this.pos = pos;
-            mBg.setColor(0xFFE53935);
-            mBg.setStyle(android.graphics.Paint.Style.FILL);
-            mFg.setColor(0xFFFFFFFF);
-            mFg.setTextAlign(android.graphics.Paint.Align.CENTER);
-            mFg.setTextSize(10f * density);
-            mFg.setFakeBoldText(true);
-        }
-
-        @Override public void draw(android.graphics.Canvas canvas) {
-            android.graphics.Rect b = getBounds();
-            float cx = b.exactCenterX();
-            float cy = b.exactCenterY();
-            canvas.drawCircle(cx, cy, Math.min(b.width(), b.height()) / 2f, mBg);
-            android.graphics.Paint.FontMetrics fm = mFg.getFontMetrics();
-            float ty = cy - (fm.ascent + fm.descent) / 2f;
-            canvas.drawText("✕", cx, ty, mFg);
-        }
-
-        @Override public void setAlpha(int alpha) { }
-        @Override public void setColorFilter(android.graphics.ColorFilter cf) { }
-        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+    private static final android.graphics.Paint sMarkBgPaint =
+            new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+    private static final android.graphics.Paint sMarkFgPaint =
+            new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+    static {
+        sMarkBgPaint.setColor(0xFFE53935);
+        sMarkBgPaint.setStyle(android.graphics.Paint.Style.FILL);
+        sMarkFgPaint.setColor(0xFFFFFFFF);
+        sMarkFgPaint.setTextAlign(android.graphics.Paint.Align.CENTER);
+        sMarkFgPaint.setFakeBoldText(true);
     }
 
-    /** Draw a small ✕ badge on the top-right of every visible icon. */
+    /** 在 RecyclerView 的 dispatchDraw 末尾绘制 ✕（只对当前网格 RecyclerView 生效）。 */
+    static void installMarkRenderer(final Object recycler, ClassLoader cl) {
+        if (!(recycler instanceof View)) return;
+        // 只挂一次（hook 的是 RecyclerView 类方法），运行时用 p.thisObject == sRecycler 判定。
+        try {
+            Class<?> rvCls = MainHook.loadClassSafely("androidx.recyclerview.widget.RecyclerView", cl);
+            if (rvCls == null) return;
+            java.lang.reflect.Method dispatch = null;
+            for (Class<?> k = rvCls; k != null && dispatch == null; k = k.getSuperclass()) {
+                try {
+                    dispatch = k.getDeclaredMethod("dispatchDraw", android.graphics.Canvas.class);
+                } catch (NoSuchMethodException ignored) {}
+            }
+            if (dispatch == null) {
+                MainModule.logMsg("[SBPlus] mark renderer: dispatchDraw not found");
+                return;
+            }
+            MainHook.hookMethod(dispatch, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
+                    try {
+                        if (!sEditMode) return;
+                        if (p.thisObject != sRecycler) return;
+                        Object canvasObj = p.args != null && p.args.length > 0 ? p.args[0] : null;
+                        if (!(canvasObj instanceof android.graphics.Canvas)) return;
+                        drawMarks((android.graphics.Canvas) canvasObj, (View) sRecycler);
+                    } catch (Throwable ignored) {}
+                }
+            });
+            sMarkRendererRecycler = recycler;
+            sMarkRendererHooked = true;
+            MainModule.logMsg("[SBPlus] mark renderer installed (canvas dispatchDraw)");
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] installMarkRenderer error: " + t);
+        }
+    }
+
+    /** 计算某个格子里图标右上角的 ✕ 中心点（RecyclerView 坐标系内）。 */
+    private static boolean markCenter(View child, float[] out) {
+        try {
+            float d = child.getResources().getDisplayMetrics().density;
+            int size = (int) (20f * d);
+            // 2026-11-22：直接按**格子边界**定位到右上角。
+            // 不用 icon.getLeft()/getWidth() —— dispatchDraw 阶段这些值不可靠
+            // （实测标记会跑到格子左边被裁）。格子自身的 left/top/width 是确定的。
+            int iconId = child.getResources().getIdentifier("icon", "id",
+                    child.getContext().getPackageName());
+            View icon = iconId != 0 ? child.findViewById(iconId) : null;
+            float iconTop = child.getTop() + 4f * d;
+            if (icon != null && icon.getTop() > 0) {
+                iconTop = child.getTop() + icon.getTop();
+            }
+            float cx = child.getLeft() + child.getWidth() - size / 2f - 4f * d;
+            float cy = iconTop + size / 2f;
+            out[0] = cx;
+            out[1] = cy;
+            out[2] = size / 2f;
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void drawMarks(android.graphics.Canvas canvas, View rv) {
+        try {
+            if (sItems == null) return;
+            float d = rv.getResources().getDisplayMetrics().density;
+            sMarkFgPaint.setTextSize(10f * d);
+            int n = ((Number) MainHook.callMethod(rv, "getChildCount")).intValue();
+            int drawn = 0;
+            for (int i = 0; i < n; i++) {
+                View child = (View) MainHook.callMethod(rv, "getChildAt", i);
+                if (child == null) continue;
+                int pos = ((Number) MainHook.callMethod(rv, "getChildLayoutPosition", child)).intValue();
+                if (pos < 0 || pos >= sItems.size()) continue;
+                float[] c = new float[3];
+                if (!markCenter(child, c)) continue;
+                canvas.drawCircle(c[0], c[1], c[2], sMarkBgPaint);
+                android.graphics.Paint.FontMetrics fm = sMarkFgPaint.getFontMetrics();
+                float ty = c[1] - (fm.ascent + fm.descent) / 2f;
+                canvas.drawText("✕", c[0], ty, sMarkFgPaint);
+                drawn++;
+            }
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] drawMarks error: " + t);
+        }
+    }
+
     private static void showDeleteMarks() {
         try {
-            if (!(sRecycler instanceof View)) return;
-            hideDeleteMarks();
-            int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
-            int added = 0, skippedPos = 0, skippedType = 0;
-            for (int i = 0; i < childCount; i++) {
-                View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
-                if (child == null || !(child instanceof ViewGroup)) { skippedType++; continue; }
-                int pos = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
-                if (pos < 0 || sItems == null || pos >= sItems.size()) { skippedPos++; continue; }
-                child.setTag(TAG_KEY_CLICKABLE, Boolean.valueOf(child.isClickable()));
-                child.setClickable(false);
-                child.setTag(TAG_KEY_POSITION, pos);
-                addDeleteMark((ViewGroup) child, pos);
-                added++;
-            }
-            MainModule.logMsg("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items"
-                    + " (children=" + childCount + " added=" + added
-                    + " skipType=" + skippedType + " skipPos=" + skippedPos + ")");
+            if (sRecycler instanceof View) ((View) sRecycler).invalidate();
+            MainModule.logMsg("[SBPlus] delete marks redrawn (canvas) on "
+                    + (sItems == null ? -1 : sItems.size()) + " items");
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] showDeleteMarks error: " + t);
         }
@@ -930,13 +975,7 @@ public final class MenuReorderHelper {
 
     private static void hideDeleteMarks() {
         try {
-            for (java.util.Map.Entry<View, MarkDrawable> e : sRemoveMarks.entrySet()) {
-                try {
-                    View child = e.getKey();
-                    if (child != null) child.getOverlay().remove(e.getValue());
-                } catch (Throwable ignored) {}
-            }
-            sRemoveMarks.clear();
+            if (sRecycler instanceof View) ((View) sRecycler).invalidate();
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] hideDeleteMarks error: " + t);
         }
@@ -949,87 +988,39 @@ public final class MenuReorderHelper {
     public static void decorateBoundItem(Object holder, int pos) {
         try {
             View child = (View) MainHook.getObjectField(holder, "itemView");
-            if (child == null || !(child instanceof ViewGroup)) return;
-            // Always strip any lingering mark from a (re)bound item — recycled
-            // off-screen items can carry a stale drawable back into view.
-            MarkDrawable old = sRemoveMarks.remove(child);
-            if (old != null) {
-                try { child.getOverlay().remove(old); } catch (Throwable ignored) {}
-            }
+            if (child == null) return;
             if (!sEditMode || sItems == null || pos < 0 || pos >= sItems.size()) return;
             disableClickTree(child);
             child.setTag(TAG_KEY_POSITION, pos);
-            addDeleteMark((ViewGroup) child, pos);
+            if (sRecycler instanceof View) ((View) sRecycler).invalidate();
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] decorateBoundItem error: " + t);
         }
     }
 
-    private static void addDeleteMark(ViewGroup child, int pos) {
-        try {
-            if (!(sRecycler instanceof View)) return;
-            View rv = (View) sRecycler;
-            android.content.Context rc = rv.getContext();
-            float d = rc.getResources().getDisplayMetrics().density;
-            final int size = (int) (20f * d);
-
-            final MarkDrawable mark = new MarkDrawable(pos, d);
-            sRemoveMarks.put(child, mark);
-            final ViewGroup childRef = child;
-            final int iconId = rc.getResources().getIdentifier("icon", "id", rc.getPackageName());
-
-            // 位置放在图标右上角；图标还没布局完就等一帧再算（只补一次，不循环）。
-            Runnable place = new Runnable() {
-                @Override public void run() {
-                    try {
-                        View icon = iconId != 0 ? childRef.findViewById(iconId) : null;
-                        int left, top;
-                        if (icon != null && icon.getWidth() > 0) {
-                            int[] il = new int[2];
-                            icon.getLocationInWindow(il);
-                            int[] cl = new int[2];
-                            childRef.getLocationInWindow(cl);
-                            left = il[0] - cl[0] + icon.getWidth() - size;
-                            top = il[1] - cl[1];
-                        } else {
-                            left = childRef.getWidth() - size - (int) (2f * d);
-                            top = (int) (2f * d);
-                        }
-                        if (left < 0) left = 0;
-                        if (top < 0) top = 0;
-                        // ViewOverlay 被裁在宿主 View 边界内：left/top 超出 child 宽高时
-                        // 标记会被裁掉（表现为"部分格子没有 ✕"）。这里夹回可见范围内。
-                        int cw = childRef.getWidth();
-                        int ch = childRef.getHeight();
-                        if (cw > 0 && left > cw - size) left = cw - size;
-                        if (ch > 0 && top > ch - size) top = ch - size;
-                        if (left < 0) left = 0;
-                        if (top < 0) top = 0;
-                        mark.setBounds(left, top, left + size, top + size);
-                        childRef.getOverlay().add(mark);
-                        childRef.invalidate();
-                    } catch (Throwable ignored) {}
-                }
-            };
-            if (child.getWidth() > 0) place.run(); else child.post(place);
-        } catch (Throwable t) {
-            MainModule.logMsg("[SBPlus] addDeleteMark error: " + t);
-        }
-    }
-
     /** 命中检测：返回被点中的删除标记对应的条目位置，没点中返回 null。 */
     private static Integer hitRemoveMark(float rawX, float rawY) {
-        for (java.util.Map.Entry<View, MarkDrawable> e : sRemoveMarks.entrySet()) {
-            View child = e.getKey();
-            MarkDrawable mark = e.getValue();
-            if (child == null || !child.isShown()) continue;
-            android.graphics.Rect b = mark.getBounds();
-            int[] loc = new int[2];
-            child.getLocationOnScreen(loc);
-            if (rawX >= loc[0] + b.left && rawX <= loc[0] + b.right
-                    && rawY >= loc[1] + b.top && rawY <= loc[1] + b.bottom) {
-                return mark.pos;
+        try {
+            if (!(sRecycler instanceof View) || sItems == null) return null;
+            View rv = (View) sRecycler;
+            int[] rl = new int[2];
+            rv.getLocationOnScreen(rl);
+            float lx = rawX - rl[0];
+            float ly = rawY - rl[1];
+            int n = ((Number) MainHook.callMethod(rv, "getChildCount")).intValue();
+            for (int i = 0; i < n; i++) {
+                View child = (View) MainHook.callMethod(rv, "getChildAt", i);
+                if (child == null) continue;
+                int pos = ((Number) MainHook.callMethod(rv, "getChildLayoutPosition", child)).intValue();
+                if (pos < 0 || pos >= sItems.size()) continue;
+                float[] c = new float[3];
+                if (!markCenter(child, c)) continue;
+                float dx = lx - c[0];
+                float dy = ly - c[1];
+                if (dx * dx + dy * dy <= c[2] * c[2]) return pos;
             }
+        } catch (Throwable t) {
+            MainModule.logMsg("[SBPlus] hitRemoveMark error: " + t);
         }
         return null;
     }
