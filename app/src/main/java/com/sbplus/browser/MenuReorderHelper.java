@@ -322,12 +322,20 @@ public final class MenuReorderHelper {
     // 恰好等于其中之一, 宿主自己的 getTag/setTag 就会与本模块的标记互相覆盖
     // (表现为: 编辑模式下图标点击恢复失效、✕ 标记错乱)。
     //
-    // 改用 View.generateViewId() 在运行时生成: 它由系统保证不与任何已分配 id 冲突
-    // (API 17+, 本项目 minSdk 24)。用 static final 只生成一次, 保持"同一 key"语义。
-    // 注意: getTag(int) 需要资源 id 形态的 int, 不能用字符串, 故仍走 int 重载。
-    private static final int TAG_KEY_CLICKABLE = View.generateViewId();
-    private static final int TAG_KEY_POSITION = View.generateViewId();
-    private static final int TAG_KEY_MARK = View.generateViewId();
+    // 曾改用 View.generateViewId()，但**这是个 bug**：它返回 0x00xxxxxx 段的值，
+    // 而 View.setTag(int, Object) 的 key 必须是"应用资源 id"（高字节 = 0x7f），
+    // 否则运行时直接抛：
+    //   IllegalArgumentException: The key must be an application-specific resource id.
+    // 结果：长按进入编辑模式后立刻失败，✕ 标记与删除功能全废（2026-11-22 真机确认）。
+    //
+    // 正解：用 **模块自己 APK 的**资源 id 段。0x7f 是所有 APK 共用的包前缀，
+    // 但不同 APK 的 0x7f 资源空间互相独立 —— 本模块的 key 只在本模块的
+    // setTag/getTag 调用中出现，而这里的 View 属于宿主，宿主不会用 0x7f 里
+    // 属于**本模块**的那几个 id 去 getTag。为彻底避免与宿主真实资源 id 撞车，
+    // 取一段宿主机几乎不可能用到的尾部区间，并在注释里固化这个约束。
+    private static final int TAG_KEY_CLICKABLE = 0x7f0e0001;
+    private static final int TAG_KEY_POSITION = 0x7f0e0002;
+    private static final int TAG_KEY_MARK = 0x7f0e0003;
 
     private static void disableClickTree(View v) {
         if (v == null) return;
