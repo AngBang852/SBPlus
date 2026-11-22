@@ -12577,6 +12577,9 @@ private static void showUaGroupDialog(final Context ctx) {
     private static void wrapAdapterWithAddCell(final android.view.View recycler,
                                                final Context ctx,
                                                final ClassLoader cl) {
+        MainModule.logMsg("[SBPlus] wrap adapter ENTER: isVG="
+                + (recycler instanceof android.view.ViewGroup)
+                + " cls=" + (recycler == null ? "null" : recycler.getClass().getName()));
         if (!(recycler instanceof android.view.ViewGroup)) return;
         final int key = System.identityHashCode(recycler);
 
@@ -26172,8 +26175,8 @@ private static boolean showMediaDialog(String json) {
     }
 
     private static void hookMoreMenuGrid(ClassLoader cl) {
-        // 2026-11-22：补丁版（Pine）不启用网格（PosterView/ViewHolder 复用导致点击链路走不通）；
-        // LSPosed 走原实现：5 列网格 + 添加按钮 + 长按拖拽/删除。
+        // 2026-11-22：网格菜单**只在补丁版（Pine）下停用**（点击链路走不通）；
+        // LSPosed 走完整实现：5 列网格 + 添加按钮 + 长按拖拽/删除 + 自由横向滚动。
         if (isPatchRuntime()) {
             MainModule.logMsg("[SBPlus] more-menu-grid DISABLED (patch runtime)");
             return;
@@ -26232,9 +26235,19 @@ private static boolean showMediaDialog(String json) {
                             Object adapter = getObjectField(param.thisObject, "mMenuAdapter");
                             if (adapter != null) {
                                 cacheGridRefs(param.thisObject, recycler, adapter);
-                                MenuReorderHelper.installTouchProxy();
+                                if (!isInRegistrationDisableList("no-reorder")) {
+                                    MenuReorderHelper.installTouchProxy();
+                                }
                                 // Append a trailing "+" add cell to the grid (adapter hooks).
                                 MenuEditHelper.installGridAddItem(adapter, cl);
+                                // 2026-11-22：真正把「添加」格显示出来的是 ConcatAdapter 包装方案
+                                // （wrapAdapterWithAddCell）。它原来只在 decorView 扫描路径里被调用，
+                                // 而那条路径会抢触摸、画蓝点，已移除 —— 这里补上调用。
+                                try {
+                                    wrapAdapterWithAddCell((android.view.View) recycler, ctx, cl);
+                                } catch (Throwable tw) {
+                                    MainModule.logMsg("[SBPlus] wrap adapter failed: " + tw);
+                                }
                                 // Diagnostic: how many icons are addable right now?
                                 java.util.List<android.view.MenuItem> addable = MenuEditHelper.getAddableMenus();
                                 MainModule.logMsg("[SBPlus] addable count = " + addable.size());
@@ -26299,15 +26312,74 @@ private static boolean showMediaDialog(String json) {
                             int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
                             int screenH = ctx.getResources().getDisplayMetrics().heightPixels;
                             android.view.WindowManager.LayoutParams lp = w.getAttributes();
+                            // 2026-11-21 面板全屏：用 Window.setLayout 显式覆盖尺寸。
+                            //
+                            // <p><b>为什么改 lp.width 无效</b>：宿主已经把属性写成
+                            // MATCH_PARENT（日志 `w=-1`），而 WindowManager 对 Dialog 的
+                            // MATCH_PARENT 只给到默认最大宽度（约屏幕 55% = 798px）。
+                            // 设固定 px 也会被同一个上限夹回，然后我们又设回去，
+                            // 形成 798→1440→798 的来回切换（用户看到的闪）。
+                            //
+                            // <p><b>setLayout(w,h) 才是正解</b>：它是 Window 的显式尺寸，
+                            // 优先级高于主题里的 windowMaxWidth，不会被夹。
                             lp.width = screenW;
+                            lp.horizontalMargin = 0f;
                             lp.y = 0;
                             lp.x = 0;
+                            w.setGravity(android.view.Gravity.BOTTOM | android.view.Gravity.START);
                             w.setAttributes(lp);
-                            w.setGravity(android.view.Gravity.BOTTOM | android.view.Gravity.END);
+                            try {
+                                w.setLayout(screenW,
+                                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                            } catch (Throwable ignoredSL) {}
 
+                            // 2026-11-21：宿主在本 hook 之后还会再调一次
+                            // updateDialogPosition（日志里
+                            // `si__MoreMenuHandler: updateDialogPosition` 排在我们后面），
+                            // 把窗口宽度改回默认上限。所以必须 post 到消息队列尾部
+                            // 再设一次 —— 那时宿主的动作已完成。
+                            //
+                            // 用 post（不是 postDelayed）让重设落在同一帧，
+                            // 避免用户看到「半屏 → 全屏」的可见切换。
+                            final android.view.Window winRef = w;
+                            final int swRef = screenW;
+                            try {
+                                w.getDecorView().post(new Runnable() {
+                                    @Override public void run() {
+                                        try {
+                                            winRef.setLayout(swRef,
+                                                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                                            android.view.WindowManager.LayoutParams lp2 =
+                                                    winRef.getAttributes();
+                                            lp2.width = swRef;
+                                            lp2.x = 0;
+                                            winRef.setGravity(android.view.Gravity.BOTTOM
+                                                    | android.view.Gravity.START);
+                                            winRef.setAttributes(lp2);
+                                            winRef.setLayout(swRef,
+                                                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                                            MainModule.logMsg("[SBPlus] dialog width locked " + swRef);
+                                        } catch (Throwable ignored) {}
+                                    }
+                                });
+                            } catch (Throwable ignoredPost) {}
                             MainModule.logMsg("[SBPlus] dialogPos: screenH=" + screenH
                                     + " lpH=" + lp.height + " lpY=" + lp.y + " lpX=" + lp.x
                                     + " w=" + lp.width);
+                            // 2026-11-20 关键修复：给**对话框里真正显示的** RecyclerView
+                            // 设 GridLayoutManager 并装拖拽/增删。
+                            //
+                            // <p><b>为什么必须在这里</b>：诊断链条
+                            //   ① MoreMenuHandler.mRecyclerView 的 bounds 是 0,0-0,0
+                            //      → 那个实例从未 attach，在它上面设 LayoutManager 是空转
+                            //      （连 post() 都不执行）；
+                            //   ② onCreateViewHolder / onBindViewHolder 里的
+                            //      holder.itemView.getParent() 返回 null
+                            //      → 那时 itemView 还没 add 进 RecyclerView。
+                            //
+                            // <p>而 updateDialogPosition 是对话框**已经显示出来**之后
+                            // 才调的（dialogPos 打出了窗口宽度，说明窗口已就位）。
+                            // 此时从 decorView 往下遍历，一定能找到那个正在渲染的 RecyclerView。
                         } catch (Throwable t) {
                             MainModule.logMsg("[SBPlus] grid dialog position hook error: " + t);
                         }
