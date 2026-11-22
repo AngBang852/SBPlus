@@ -1447,6 +1447,23 @@ private static final String[] RANDOM_UAS = new String[]{
                 } catch (NoSuchMethodException ignored) {}
             }
             if (m == null) {
+                // 2026-11-22：类继承链找不到时，再查接口（getMethods 包含接口方法）。
+                // 三星把 MoreMenuRecyclerAdapter 的 getItem(int) 定义在接口上，
+                // 只沿 getSuperclass() 找不到 → 添加按钮的 hook 安装失败。
+                try {
+                    for (java.lang.reflect.Method cand : clazz.getMethods()) {
+                        if (!methodName.equals(cand.getName())) continue;
+                        Class<?>[] p = cand.getParameterTypes();
+                        if (p.length != paramTypes.length) continue;
+                        boolean ok = true;
+                        for (int i = 0; i < p.length; i++) {
+                            if (!p[i].equals(paramTypes[i])) { ok = false; break; }
+                        }
+                        if (ok) { m = cand; break; }
+                    }
+                } catch (Throwable ignoredIf) {}
+            }
+            if (m == null) {
                 throw new NoSuchMethodException(clazz.getName() + "." + methodName);
             }
             m.setAccessible(true);
@@ -10036,28 +10053,7 @@ private static void showUaGroupDialog(final Context ctx) {
         }
     }
 
-    /**
-     * 网格菜单开关。
-     *
-     * <p><b>2026-11-22 修复读写不同源</b>：`saveGridMenuEnabled` 写的是
-     * {@link #processPrefs}（浏览器进程本地的 {@code sbplus_config}），
-     * 而这里原实现用 {@code readBoolPref} 读的是 remote prefs
-     * （{@code samsung_download_bridge}）——两份文件不同，导致用户在设置里
-     * 打开开关后，运行时永远读到 false：网格显示走的是无条件路径（碰巧能看），
-     * 但分页、滑动、指示点等回调全部因 false 被跳过（表现为"有网格但滑不动"）。
-     * 现在读写都用 {@code processPrefs}，同源。
-     */
-    private static boolean isGridMenuEnabled() {
-        try {
-            if (sAppContext == null) return true;   // 注册早期按"开"处理，onCreate 后再按真实值
-            // 默认 true：网格是用户明确要的功能；只有用户主动在设置里关过（本地
-            // sbplus_config 写 false）才关闭。历史上默认 false + 读写不同源，导致
-            // "开关开着但运行时永远 false"的问题。
-            return processPrefs(sAppContext).getBoolean(KEY_ENABLE_GRID_MENU, true);
-        } catch (Throwable t) {
-            return true;
-        }
-    }
+    private static boolean isGridMenuEnabled() { return readBoolPref(KEY_ENABLE_GRID_MENU, false); }
 
     private static void saveGridMenuEnabled(boolean enabled) {
         try {
@@ -26176,9 +26172,13 @@ private static boolean showMediaDialog(String json) {
     }
 
     private static void hookMoreMenuGrid(ClassLoader cl) {
-        // 2026-11-22：补丁版（Pine）不启用网格菜单；LSPosed 走原来的完整实现。
+        // 2026-11-22：网格菜单**只在补丁版（Pine）下停用**。
+        // 浏览器原版「更多」菜单是竖排列表，网格是本模块自己加的；补丁版下
+        // 点击链路走不通（PosterView/ViewHolder 复用导致 setOnClickListener
+        // 挂不到正确实例），因此补丁版保持原生列表。
+        // LSPosed 版完整保留网格 + 添加按钮 + 长按拖拽/删除。
         if (isPatchRuntime()) {
-            MainModule.logMsg("[SBPlus] more-menu-grid DISABLED (patch runtime)");
+            MainModule.logMsg("[SBPlus] more-menu-grid DISABLED (patch runtime, native list kept)");
             return;
         }
         final String handlerCls = "com.sec.android.app.sbrowser.toolbar.MoreMenuHandler";
@@ -26235,7 +26235,9 @@ private static boolean showMediaDialog(String json) {
                             Object adapter = getObjectField(param.thisObject, "mMenuAdapter");
                             if (adapter != null) {
                                 cacheGridRefs(param.thisObject, recycler, adapter);
-                                MenuReorderHelper.installTouchProxy();
+                                if (!isInRegistrationDisableList("no-reorder")) {
+                                    MenuReorderHelper.installTouchProxy();
+                                }
                                 // Append a trailing "+" add cell to the grid (adapter hooks).
                                 MenuEditHelper.installGridAddItem(adapter, cl);
                                 // Diagnostic: how many icons are addable right now?
@@ -26302,15 +26304,355 @@ private static boolean showMediaDialog(String json) {
                             int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
                             int screenH = ctx.getResources().getDisplayMetrics().heightPixels;
                             android.view.WindowManager.LayoutParams lp = w.getAttributes();
+                            // 2026-11-21 面板全屏：用 Window.setLayout 显式覆盖尺寸。
+                            //
+                            // <p><b>为什么改 lp.width 无效</b>：宿主已经把属性写成
+                            // MATCH_PARENT（日志 `w=-1`），而 WindowManager 对 Dialog 的
+                            // MATCH_PARENT 只给到默认最大宽度（约屏幕 55% = 798px）。
+                            // 设固定 px 也会被同一个上限夹回，然后我们又设回去，
+                            // 形成 798→1440→798 的来回切换（用户看到的闪）。
+                            //
+                            // <p><b>setLayout(w,h) 才是正解</b>：它是 Window 的显式尺寸，
+                            // 优先级高于主题里的 windowMaxWidth，不会被夹。
                             lp.width = screenW;
+                            lp.horizontalMargin = 0f;
                             lp.y = 0;
                             lp.x = 0;
+                            w.setGravity(android.view.Gravity.BOTTOM | android.view.Gravity.START);
                             w.setAttributes(lp);
-                            w.setGravity(android.view.Gravity.BOTTOM | android.view.Gravity.END);
+                            try {
+                                w.setLayout(screenW,
+                                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                            } catch (Throwable ignoredSL) {}
 
+                            // 2026-11-21：宿主在本 hook 之后还会再调一次
+                            // updateDialogPosition（日志里
+                            // `si__MoreMenuHandler: updateDialogPosition` 排在我们后面），
+                            // 把窗口宽度改回默认上限。所以必须 post 到消息队列尾部
+                            // 再设一次 —— 那时宿主的动作已完成。
+                            //
+                            // 用 post（不是 postDelayed）让重设落在同一帧，
+                            // 避免用户看到「半屏 → 全屏」的可见切换。
+                            final android.view.Window winRef = w;
+                            final int swRef = screenW;
+                            try {
+                                w.getDecorView().post(new Runnable() {
+                                    @Override public void run() {
+                                        try {
+                                            winRef.setLayout(swRef,
+                                                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                                            android.view.WindowManager.LayoutParams lp2 =
+                                                    winRef.getAttributes();
+                                            lp2.width = swRef;
+                                            lp2.x = 0;
+                                            winRef.setGravity(android.view.Gravity.BOTTOM
+                                                    | android.view.Gravity.START);
+                                            winRef.setAttributes(lp2);
+                                            winRef.setLayout(swRef,
+                                                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                                            MainModule.logMsg("[SBPlus] dialog width locked " + swRef);
+                                        } catch (Throwable ignored) {}
+                                    }
+                                });
+                            } catch (Throwable ignoredPost) {}
                             MainModule.logMsg("[SBPlus] dialogPos: screenH=" + screenH
                                     + " lpH=" + lp.height + " lpY=" + lp.y + " lpX=" + lp.x
                                     + " w=" + lp.width);
+                            // 2026-11-20 关键修复：给**对话框里真正显示的** RecyclerView
+                            // 设 GridLayoutManager 并装拖拽/增删。
+                            //
+                            // <p><b>为什么必须在这里</b>：诊断链条
+                            //   ① MoreMenuHandler.mRecyclerView 的 bounds 是 0,0-0,0
+                            //      → 那个实例从未 attach，在它上面设 LayoutManager 是空转
+                            //      （连 post() 都不执行）；
+                            //   ② onCreateViewHolder / onBindViewHolder 里的
+                            //      holder.itemView.getParent() 返回 null
+                            //      → 那时 itemView 还没 add 进 RecyclerView。
+                            //
+                            // <p>而 updateDialogPosition 是对话框**已经显示出来**之后
+                            // 才调的（dialogPos 打出了窗口宽度，说明窗口已就位）。
+                            // 此时从 decorView 往下遍历，一定能找到那个正在渲染的 RecyclerView。
+                            try {
+                                android.view.View decor = w.getDecorView();
+                                java.util.List<android.view.View> all =
+                                        new java.util.ArrayList<android.view.View>();
+                                collectAllViews(decor, all);
+                                int rvCount = 0;
+                                for (android.view.View v : all) {
+                                    String cn = v.getClass().getName();
+                                    if (!cn.contains("RecyclerView")) continue;
+                                    if (cn.contains("Nested")) continue;
+                                    rvCount++;
+                                    Object cur = callMethod(v, "getLayoutManager");
+                                    String curName = cur == null ? "null"
+                                            : cur.getClass().getSimpleName();
+                                    if (!curName.contains("GridLayoutManager")) {
+                                        Class<?> glm3 = loadClassSafely(
+                                                "androidx.recyclerview.widget.GridLayoutManager",
+                                                MainHook.class.getClassLoader());
+                                        Object g3;
+                                        try {
+                                            g3 = newInstance(glm3,
+                                                    new Class[]{Context.class, int.class}, ctx, 2);
+                                        } catch (Throwable t1) {
+                                            g3 = newInstance(glm3,
+                                                    new Class[]{int.class}, 2);
+                                        }
+                                        try { callMethod(g3, "setOrientation", 0); }
+                                        catch (Throwable ignoredOri) {}
+                                        callMethod(v, "setLayoutManager", g3);
+                                    }
+                                    // 2026-11-21：布局还没完成时（w=0 h=0）设 LayoutManager
+                                    // 会被随后的 measure 覆盖回去。等一帧再设一次。
+                                    if (v.getWidth() == 0) {
+                                        final android.view.View rvRef = v;
+                                        final Context ctxRef2 = ctx;
+                                        v.post(new Runnable() {
+                                            @Override public void run() {
+                                                try {
+                                                    Object lm2 = callMethod(rvRef, "getLayoutManager");
+                                                    String nm2 = lm2 == null ? "null"
+                                                            : lm2.getClass().getSimpleName();
+                                                    if (nm2.contains("GridLayoutManager")) return;
+                                                    Class<?> g2c = loadClassSafely(
+                                                            "androidx.recyclerview.widget.GridLayoutManager",
+                                                            MainHook.class.getClassLoader());
+                                                    Object g2o;
+                                                    try {
+                                                        g2o = newInstance(g2c,
+                                                                new Class[]{Context.class, int.class},
+                                                                ctxRef2, 2);
+                                                    } catch (Throwable t1) {
+                                                        g2o = newInstance(g2c,
+                                                                new Class[]{int.class}, 2);
+                                                    }
+                                                    try { callMethod(g2o, "setOrientation", 0); }
+                                                    catch (Throwable ignoredO) {}
+                                                    callMethod(rvRef, "setLayoutManager", g2o);
+                                                    MainModule.logMsg("[SBPlus] grid re-applied after layout");
+                                                } catch (Throwable t) {
+                                                    MainModule.logMsg("[SBPlus] grid re-apply err: " + t);
+                                                }
+                                            }
+                                        });
+                                    }                                    // 2026-11-21：把 RecyclerView 及其祖先拉到屏幕宽。
+                                    //
+                                    // 窗口已是 1440，但 RecyclerView 只有 798 ——
+                                    // 中间某层容器宽度受限（Dialog 的默认最大宽度
+                                    // 通常通过 layout_margin 或 maxWidth 施加）。
+                                    // 逐层设 width=screenW 并清 maxWidth。
+                                    try {
+                                        android.view.View pv = v;
+                                        int d2 = 0;
+                                        while (pv != null && d2 < 8) {
+                                            android.view.ViewGroup.LayoutParams vlp =
+                                                    pv.getLayoutParams();
+                                            if (vlp != null) {
+                                                vlp.width = ctx.getResources()
+                                                        .getDisplayMetrics().widthPixels;
+                                                pv.setLayoutParams(vlp);
+                                            }
+                                            try {
+                                                java.lang.reflect.Method sm = pv.getClass()
+                                                        .getMethod("setMaxWidth", int.class);
+                                                sm.setAccessible(true);
+                                                sm.invoke(pv, Integer.MAX_VALUE);
+                                            } catch (Throwable ignoredMx) {}
+                                            android.view.ViewParent vp2 = pv.getParent();
+                                            if (!(vp2 instanceof android.view.View)) break;
+                                            pv = (android.view.View) vp2;
+                                            d2++;
+                                        }
+                                        MainModule.logMsg("[SBPlus] width walked " + d2 + " levels");
+                                        // 2026-11-21：RecyclerView 高度按内容算。
+                                        //
+                                        // 原来固定 504px（正好 2 行），而我们往 adapter 的
+                                        // mPrimaryItems 里塞了第 28 项（「添加」格），
+                                        // 它落在第 3 行 —— 被 504px 的高度裁掉，看不见。
+                                        // 改成 WRAP_CONTENT，让它按实际行数撑开。
+                                        try {
+                                            android.view.ViewGroup.LayoutParams vlp2 =
+                                                    ((android.view.View) v).getLayoutParams();
+                                            if (vlp2 != null) {
+                                                vlp2.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+                                                ((android.view.View) v).setLayoutParams(vlp2);
+                                            }
+                                        } catch (Throwable ignoredH) {}
+                                        // 2026-11-21：主动遍历已有子 View 做 restyle。
+                                        //
+                                        // <p>为什么需要：onBindViewHolder 只在「绑定数据」时触发，
+                                        // 而我们在 updateDialogPosition 里改 LayoutManager 时，
+                                        // 条目已经绑定完了 —— 之后不会再有 bind 事件，
+                                        // 所以那两条 hook 里的 restyle 永远不会跑。
+                                        //
+                                        // <p>直接遍历 RecyclerView 的当前子 View，
+                                        // 用 adapter 的 getItemViewType/position 反查 holder 拿不到，
+                                        // 但可以遍历每个 itemView 的内部结构做同样的改造
+                                        // （restyleItemView 只改 LinearLayout 的方向/重力/尺寸）。
+                                        try {
+                                            if (v instanceof android.view.ViewGroup
+                                                    && !isInRegistrationDisableList("no-restyle")) {
+                                                android.view.ViewGroup vg =
+                                                        (android.view.ViewGroup) v;
+                                                int n2 = vg.getChildCount();
+                                                for (int i = 0; i < n2; i++) {
+                                                    restyleItemView(vg.getChildAt(i),
+                                                            ctx.getResources()
+                                                                    .getDisplayMetrics().widthPixels);
+                                                }
+                                                MainModule.logMsg("[SBPlus] restyled "
+                                                        + n2 + " existing children");
+                                            }
+                                        } catch (Throwable ignoredRs) {}
+                                    } catch (Throwable ignoredW) {}                                    MainModule.logMsg("[SBPlus] decorRv[" + rvCount + "] "
+                                            + cn.substring(cn.lastIndexOf('.') + 1)
+                                            + " was=" + curName
+                                            + " -> grid, w=" + v.getWidth()
+                                            + " h=" + v.getHeight());
+
+                                    // 长按拖拽排序 / 增删图标：
+                                    // 这两个能力原先只在 updateContentView 里调，
+                                    // 用的还是那个 0×0 的空转 recycler —— 触摸代理装在
+                                    // 看不见的 View 上，永远收不到长按事件。
+                                    // 现在在真正显示的 recycler 上重新装一遍。
+                                    try {
+                                        MenuReorderHelper.setClassLoader(cl);
+                                        MenuEditHelper.setClassLoader(cl);
+                                        Object ad = callMethod(v, "getAdapter");
+                                        if (ad != null) {
+                                            cacheGridRefs(param.thisObject, v, ad);
+                                            if (!isInRegistrationDisableList("no-reorder")) {
+                                                MenuReorderHelper.installTouchProxy();
+                                            }
+                                            MenuEditHelper.installGridAddItem(ad, cl);
+                                            MainModule.logMsg("[SBPlus] reorder+add installed on LIVE rv");
+                                            // 2026-11-21 诊断：直接测编程滚动，区分「手势被拦」与「内容不够宽」
+                                            try {
+                                                final android.view.View rvD = v;
+                                                v.postDelayed(new Runnable() {
+                                                    @Override public void run() {
+                                                        try {
+                                                            Object lmD = callMethod(rvD, "getLayoutManager");
+                                                            Object oriD = (lmD != null)
+                                                                    ? callMethod(lmD, "getOrientation") : "?";
+                                                            Object cntD = callMethod(rvD, "getAdapter");
+                                                            Object nD = (cntD != null)
+                                                                    ? callMethod(cntD, "getItemCount") : "?";
+                                                            callMethod(rvD, "scrollToPosition", 27);
+                                                            rvD.postDelayed(new Runnable() {
+                                                                @Override public void run() {
+                                                                    try {
+                                                                        Object sx = callMethod(rvD, "computeHorizontalScrollRange");
+                                                                        Object ex = callMethod(rvD, "computeHorizontalScrollExtent");
+                                                                        Object off = callMethod(rvD, "computeHorizontalScrollOffset");
+                                                                        int kids = ((android.view.ViewGroup) rvD).getChildCount();
+                                                                        MainModule.logMsg("[SBPlus] scrollProbe: ori=" + oriD
+                                                                                                + " items=" + nD + " kids=" + kids
+                                                                                                + " range=" + sx + " ext=" + ex + " off=" + off
+                                                                                                + " rvW=" + rvD.getWidth());
+                                                                    } catch (Throwable tq) {
+                                                                        MainModule.logMsg("[SBPlus] scrollProbe inner err: " + tq);
+                                                                    }
+                                                                }
+                                                            }, 300);
+                                                        } catch (Throwable tq) {
+                                                            MainModule.logMsg("[SBPlus] scrollProbe err: " + tq);
+                                                        }
+                                                    }
+                                                }, 800);
+                                            } catch (Throwable ignored) {}
+                                            // 2026-11-21 新思路：不碰宿主 adapter，自己在
+                                            // RecyclerView 上方浮一层「+」按钮。
+                                            //
+                                            // <p>为什么换路线：往 adapter 的 mPrimaryItems 塞外来
+                                            // MenuItem 会让宿主 onBindViewHolder 走 Pine hook 链
+                                            // 无限递归（47 层栈帧）→ SIGSEGV；而 hook
+                                            // getItemCount 在 Pine 上静默失败。两条路都堵死。
+                                            //
+                                            // <p>浮层方案的优点：完全不侵入宿主数据结构，
+                                            // 只是在自己的 ViewGroup 里加一个普通 Button，
+                                            // 点击调 MenuAddButtonHelper.showAddDialog。
+                                            // 2026-11-21 最终方案：包装 adapter。
+                                            //
+                                            // 前面试过 7 种方案（改数据源 / hook getItemCount /
+                                            // 父容器加 View / setForeground / PopupWindow /
+                                            // decorView 浮层 / 注入 MenuItem）全部失败。
+                                            //
+                                            // 本方案不碰宿主数据结构，只把 adapter 对象**换掉**：
+                                            // recyclerView.setAdapter(new AddCellAdapter(host, ...))。
+                                            // 前 host 项全部委托宿主，末尾追加一格自造的「添加」格。
+                                            // 这是标准 RecyclerView 用法，布局/滚动/点击/复用全由框架处理。
+                                            try {
+                                                wrapAdapterWithAddCell(v, ctx, cl);
+                                            } catch (Throwable tw) {
+                                                MainModule.logMsg("[SBPlus] wrap adapter failed: " + tw);
+                                            }
+                                            // 2026-11-21 诊断：getItemCount hook 装上了却从不触发，
+                                            // 需要确认 adapter 的字段结构（改数据源比 hook 方法更可靠）。
+                                            try {
+                                                StringBuilder fs = new StringBuilder(
+                                                        "[SBPlus] adapter fields:");
+                                                for (java.lang.reflect.Field fld
+                                                        : ad.getClass().getDeclaredFields()) {
+                                                    fs.append(" ").append(fld.getName())
+                                                      .append(":").append(fld.getType().getSimpleName());
+                                                }
+                                                MainModule.logMsg(fs.toString());
+                                                // 再打印 getItemCount 定义在哪个类
+                                                for (Class<?> k = ad.getClass();
+                                                        k != null && k != Object.class;
+                                                        k = k.getSuperclass()) {
+                                                    try {
+                                                        k.getDeclaredMethod("getItemCount");
+                                                        MainModule.logMsg("[SBPlus] getItemCount declared in "
+                                                                + k.getName());
+                                                        break;
+                                                    } catch (NoSuchMethodException ignored2) {}
+                                                }
+                                            } catch (Throwable ignoredDiag) {}
+                                            // 2026-11-21 诊断：打印真实 adapter 的类名，
+                                            // 确认 add-item hook 该挂在哪。
+                                            try {
+                                                // 2026-11-21 诊断：RecyclerView$Adapter 被 R8 混淆，
+                                            // 需要知道真实类名 + 宿主 adapter 的构造器签名。
+                                            try {
+                                                Class<?> ac = ad.getClass();
+                                                StringBuilder sb2 = new StringBuilder(
+                                                        "[SBPlus] adapter ctors:");
+                                                for (java.lang.reflect.Constructor<?> ct
+                                                        : ac.getDeclaredConstructors()) {
+                                                    sb2.append(" (");
+                                                    Class<?>[] ps = ct.getParameterTypes();
+                                                    for (int i2 = 0; i2 < ps.length; i2++) {
+                                                        if (i2 > 0) sb2.append(",");
+                                                        sb2.append(ps[i2].getSimpleName());
+                                                    }
+                                                    sb2.append(")");
+                                                }
+                                                MainModule.logMsg(sb2.toString());
+                                                // 沿父类链找 Adapter 基类的真实名字
+                                                for (Class<?> k = ac; k != null && k != Object.class;
+                                                        k = k.getSuperclass()) {
+                                                    MainModule.logMsg("[SBPlus] adapter super: "
+                                                            + k.getName());
+                                                }
+                                            } catch (Throwable ignoredCt) {}
+                                            MainModule.logMsg("[SBPlus] live adapter class: "
+                                                        + ad.getClass().getName()
+                                                        + " count=" + callMethod(ad, "getItemCount"));
+                                            } catch (Throwable ignoredDiag) {}
+
+                                        }
+                                    } catch (Throwable tr) {
+                                        MainModule.logMsg("[SBPlus] install reorder on live rv err: " + tr);
+                                    }
+                                }
+                                if (rvCount == 0) {
+                                    MainModule.logMsg("[SBPlus] decorRv: none found in dialog");
+                                }
+                            } catch (Throwable td) {
+                                MainModule.logMsg("[SBPlus] decorRv scan err: " + td);
+                            }
                         } catch (Throwable t) {
                             MainModule.logMsg("[SBPlus] grid dialog position hook error: " + t);
                         }

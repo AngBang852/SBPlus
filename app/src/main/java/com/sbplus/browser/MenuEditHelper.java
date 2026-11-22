@@ -226,7 +226,7 @@ public final class MenuEditHelper {
             // LayoutManager measures the item, so match_parent never resolves to the content
             // width (which breaks 5-columns-per-page alignment).
             try {
-                MainHook.findAndHookMethod(adapterCls, "onCreateViewHolder",
+                MainHook.findAndHookMethodInHierarchy(adapterCls, "onCreateViewHolder",
                         MainHook.loadClassSafely("android.view.ViewGroup", cl), int.class,
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam p) throws Throwable {
@@ -284,15 +284,21 @@ public final class MenuEditHelper {
             }
 
             // getItem(I) -> return null for the "+" cell and blank fillers (no backing MenuItem).
-            MainHook.findAndHookMethod(adapterCls, "getItem", int.class,
-                new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
-                        int pos = (Integer) p.args[0];
-                        if (sIconCount >= 0 && pos >= sIconCount) {
-                            p.setResult(null); // "+" or filler -> no backing MenuItem
+            // 2026-11-22：31.0.2.39 的 adapter 没有 getItem(int)（方法被混淆/移除），
+            // 找不到就跳过这一步，不能让它中断后面的 onBindViewHolder/样式 hook。
+            try {
+                MainHook.findAndHookMethodInHierarchy(adapterCls, "getItem", int.class,
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) throws Throwable {
+                            int pos = (Integer) p.args[0];
+                            if (sIconCount >= 0 && pos >= sIconCount) {
+                                p.setResult(null); // "+" or filler -> no backing MenuItem
+                            }
                         }
-                    }
-                });
+                    });
+            } catch (Throwable ignoredGetItem) {
+                MainModule.logMsg("[SBPlus] getItem hook skipped (method missing): " + ignoredGetItem);
+            }
 
             // onBindViewHolder(ViewHolder, I) after -> style the add cell, blank the fillers.
             // ViewHolder 类名被 R8 混淆(旧版 g1),通过 onBindViewHolder 方法参数类型反推
@@ -305,7 +311,7 @@ public final class MenuEditHelper {
                 }
             }
             if (vhCls == null) throw new ClassNotFoundException("ViewHolder for onBindViewHolder");
-            MainHook.findAndHookMethod(adapterCls, "onBindViewHolder",
+            MainHook.findAndHookMethodInHierarchy(adapterCls, "onBindViewHolder",
                     vhCls,
                     int.class,
                 new XC_MethodHook() {
