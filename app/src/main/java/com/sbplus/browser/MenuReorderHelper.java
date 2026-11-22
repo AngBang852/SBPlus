@@ -264,13 +264,12 @@ public final class MenuReorderHelper {
                         return false;   // 不吞事件，让 RecyclerView 完成滚动
                     }
                     int underRaw = positionUnderRaw(rx, ry);
+                    Integer markPos = hitRemoveMark(rx, ry);
                     MainModule.logMsg("[SBPlus] UP in edit: underRaw=" + underRaw
-                            + " hasMark=" + (hitRemoveMark(rx, ry) != null));
-                    View mark = hitRemoveMark(rx, ry);
-                    if (mark != null) {
-                        Integer p = (Integer) mark.getTag();
-                        if (p != null && sItems != null && p >= 0 && p < sItems.size()) {
-                            MenuItem item = sItems.get(p);
+                            + " hasMark=" + (markPos != null));
+                    if (markPos != null) {
+                        if (sItems != null && markPos >= 0 && markPos < sItems.size()) {
+                            MenuItem item = sItems.get(markPos);
                             removeItem(item);
                             showDeleteMarks();
                         }
@@ -856,51 +855,74 @@ public final class MenuReorderHelper {
     // ✕ delete marks (shown while in edit mode).
     // ---------------------------------------------------------------------------------
 
-    // 2026-10-04:改用 ConcurrentHashMap。它是静态 Map,写入点在菜单交互路径、
-// 读取点在遍历绘制路径,原用 HashMap 时若两处并发会抛 ConcurrentModificationException;
-// 换并发容器后无需依赖"调用方恰好都在 UI 线程"这一隐含约定。
-    private static final java.util.Map<View, View> sRemoveMarks =
+    // 2026-11-22：删除标记改用 **ViewOverlay + Drawable** 绘制，彻底不碰宿主 itemView 的布局。
+    //
+    // <p>为什么换：原实现往 itemView 里 addView 一个 TextView：
+    // <ul>
+    //   <li>若容器是 LinearLayout，却用 RelativeLayout.LayoutParams → 布局时
+    //       ClassCastException 直接闪退（真机崩溃栈确认）；</li>
+    //   <li>换成正确类型的 LayoutParams 又会挤占容器布局（图标被推走/标记被裁），
+    //       表现为"部分格子没有 ✕"。</li>
+    // </ul>
+    // ViewOverlay 画在 View 内容之上，不参与测量和布局，也没有任何 LayoutParams 参与 ——
+    // 既不会崩，也不会挤动图标。
+    private static final java.util.Map<View, MarkDrawable> sRemoveMarks =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 红色圆形 + 白色 ✕ 的删除标记。 */
+    private static final class MarkDrawable extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint mBg =
+                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint mFg =
+                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        final int pos;
+
+        MarkDrawable(int pos, float density) {
+            this.pos = pos;
+            mBg.setColor(0xFFE53935);
+            mBg.setStyle(android.graphics.Paint.Style.FILL);
+            mFg.setColor(0xFFFFFFFF);
+            mFg.setTextAlign(android.graphics.Paint.Align.CENTER);
+            mFg.setTextSize(10f * density);
+            mFg.setFakeBoldText(true);
+        }
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            canvas.drawCircle(cx, cy, Math.min(b.width(), b.height()) / 2f, mBg);
+            android.graphics.Paint.FontMetrics fm = mFg.getFontMetrics();
+            float ty = cy - (fm.ascent + fm.descent) / 2f;
+            canvas.drawText("✕", cx, ty, mFg);
+        }
+
+        @Override public void setAlpha(int alpha) { }
+        @Override public void setColorFilter(android.graphics.ColorFilter cf) { }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+    }
 
     /** Draw a small ✕ badge on the top-right of every visible icon. */
     private static void showDeleteMarks() {
         try {
             if (!(sRecycler instanceof View)) return;
             hideDeleteMarks();
-            View rv = (View) sRecycler;
-            // Allow ✕ marks to draw slightly outside item bounds without being clipped.
-            if (rv instanceof ViewGroup) {
-                ((ViewGroup) rv).setClipChildren(false);
-                ((ViewGroup) rv).setClipToPadding(false);
-            }
             int childCount = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
             int added = 0, skippedPos = 0, skippedType = 0;
-            StringBuilder diag = new StringBuilder();
             for (int i = 0; i < childCount; i++) {
                 View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
                 if (child == null || !(child instanceof ViewGroup)) { skippedType++; continue; }
                 int pos = ((Number) MainHook.callMethod(sRecycler, "getChildLayoutPosition", child)).intValue();
-                if (pos < 0 || sItems == null || pos >= sItems.size()) {
-                    skippedPos++;
-                    if (diag.length() < 200) diag.append(" [i=").append(i).append(" pos=").append(pos)
-                            .append(" size=").append(sItems == null ? -1 : sItems.size()).append("]");
-                    continue;
-                }
-                // Block the original click while editing (and remember its clickable state).
+                if (pos < 0 || sItems == null || pos >= sItems.size()) { skippedPos++; continue; }
                 child.setTag(TAG_KEY_CLICKABLE, Boolean.valueOf(child.isClickable()));
                 child.setClickable(false);
-                // Remove any stale mark already on this (recycled) child, then re-draw.
-                View old = sRemoveMarks.remove(child);
-                if (old != null && old.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) old.getParent()).removeView(old);
-                }
                 child.setTag(TAG_KEY_POSITION, pos);
                 addDeleteMark((ViewGroup) child, pos);
                 added++;
             }
             MainModule.logMsg("[SBPlus] delete marks shown on " + sRemoveMarks.size() + " items"
                     + " (children=" + childCount + " added=" + added
-                    + " skipType=" + skippedType + " skipPos=" + skippedPos + ")" + diag);
+                    + " skipType=" + skippedType + " skipPos=" + skippedPos + ")");
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] showDeleteMarks error: " + t);
         }
@@ -908,29 +930,13 @@ public final class MenuReorderHelper {
 
     private static void hideDeleteMarks() {
         try {
-            for (View mark : sRemoveMarks.values()) {
-                View p = (View) mark.getParent();
-                if (p instanceof ViewGroup) ((ViewGroup) p).removeView(mark);
+            for (java.util.Map.Entry<View, MarkDrawable> e : sRemoveMarks.entrySet()) {
+                try {
+                    View child = e.getKey();
+                    if (child != null) child.getOverlay().remove(e.getValue());
+                } catch (Throwable ignored) {}
             }
             sRemoveMarks.clear();
-            // Belt-and-suspenders: scan every current child and remove any lingering ✕
-            // (covers marks whose parent changed after a page-scroll/recycle).
-            if (sRecycler instanceof View) {
-                int n = ((Number) MainHook.callMethod(sRecycler, "getChildCount")).intValue();
-                for (int i = 0; i < n; i++) {
-                    View child = (View) MainHook.callMethod(sRecycler, "getChildAt", i);
-                    if (child instanceof ViewGroup) {
-                        ViewGroup vg = (ViewGroup) child;
-                        for (int j = vg.getChildCount() - 1; j >= 0; j--) {
-                            View c = vg.getChildAt(j);
-                            Object marker = c.getTag(TAG_KEY_MARK);
-                            if ("SBPlus-RemoveMark".equals(marker)) {
-                                vg.removeView(c);
-                            }
-                        }
-                    }
-                }
-            }
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] hideDeleteMarks error: " + t);
         }
@@ -944,22 +950,14 @@ public final class MenuReorderHelper {
         try {
             View child = (View) MainHook.getObjectField(holder, "itemView");
             if (child == null || !(child instanceof ViewGroup)) return;
-            ViewGroup vg = (ViewGroup) child;
-            // Always strip any lingering ✕ on a (re)bound item, regardless of edit mode —
-            // recycled off-screen items can carry a stale mark back into view.
-            for (int j = vg.getChildCount() - 1; j >= 0; j--) {
-                View c = vg.getChildAt(j);
-                if ("SBPlus-RemoveMark".equals(c.getTag(TAG_KEY_MARK))) {
-                    vg.removeView(c);
-                    sRemoveMarks.remove(child);
-                }
+            // Always strip any lingering mark from a (re)bound item — recycled
+            // off-screen items can carry a stale drawable back into view.
+            MarkDrawable old = sRemoveMarks.remove(child);
+            if (old != null) {
+                try { child.getOverlay().remove(old); } catch (Throwable ignored) {}
             }
             if (!sEditMode || sItems == null || pos < 0 || pos >= sItems.size()) return;
             disableClickTree(child);
-            View old = sRemoveMarks.remove(child);
-            if (old != null && old.getParent() instanceof ViewGroup) {
-                ((ViewGroup) old.getParent()).removeView(old);
-            }
             child.setTag(TAG_KEY_POSITION, pos);
             addDeleteMark((ViewGroup) child, pos);
         } catch (Throwable t) {
@@ -972,72 +970,65 @@ public final class MenuReorderHelper {
             if (!(sRecycler instanceof View)) return;
             View rv = (View) sRecycler;
             android.content.Context rc = rv.getContext();
-            TextView mark = new TextView(rc);
-            mark.setText("✕");
-            mark.setTextColor(Color.rgb(0xFF, 0xFF, 0xFF));
-            mark.setTextSize(10f);
-            mark.setGravity(Gravity.CENTER);
             float d = rc.getResources().getDisplayMetrics().density;
-            int size = (int) (20f * d);
-            GradientDrawable bg = new GradientDrawable();
-            bg.setShape(GradientDrawable.OVAL);
-            bg.setColor(Color.rgb(0xE5, 0x39, 0x35));
-            mark.setBackground(bg);
-            mark.setTag(pos);
-            // Unique marker so we can reliably find and remove this ✕ later.
-            mark.setTag(TAG_KEY_MARK, "SBPlus-RemoveMark");
+            final int size = (int) (20f * d);
 
-        int iconId = rc.getResources().getIdentifier("icon", "id", rc.getPackageName());
-        View icon = iconId != 0 ? child.findViewById(iconId) : null;
-        // 2026-11-22 修复「部分格子没有 ✕」：
-        // 原实现先 addView，再用 setX/setY 把标记按**绝对坐标**挪到图标右上角。
-        // 但 pin 运行时 mark.getWidth() 往往还是 0（刚 add，尚未测量），
-        // 算出的 x = iconLeft + iconWidth - 0 会落到格子外面，被父容器裁掉 ——
-        // 表现为"标记加了但看不见"，且只在部分格子上出现（取决于布局时序）。
-        //
-        // 改为**纯布局规则**定位：ALIGN_PARENT_TOP + ALIGN_PARENT_END，
-        // 由 RelativeLayout 自己算，不依赖任何测量时序。
-        child.setClipChildren(false);
-        child.setClipToPadding(false);
-        RelativeLayout.LayoutParams rlp = new RelativeLayout.LayoutParams(size, size);
-        rlp.addRule(RelativeLayout.ALIGN_PARENT_TOP);
-        rlp.addRule(RelativeLayout.ALIGN_PARENT_END);
-
-        child.addView(mark, rlp);
-        mark.bringToFront();
-        // 用 margin 微调：右上角向内收一点点，避免压住图标边缘。
-        int inset = (int) (2f * d);
-        rlp.topMargin = inset;
-        rlp.rightMargin = inset;
-        mark.setLayoutParams(rlp);
-
-        // 2026-11-22：不再用绝对坐标 pin（依赖 mark 已测量，时序不稳会算出界被裁）。
-        // 位置由上面的 RelativeLayout 规则决定。
-            mark.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    Integer p = (Integer) v.getTag();
-                    if (p != null && sItems != null && p >= 0 && p < sItems.size()) {
-                        MenuItem item = sItems.get(p);
-                        removeItem(item);
-                        showDeleteMarks();
-                    }
-                }
-            });
+            final MarkDrawable mark = new MarkDrawable(pos, d);
             sRemoveMarks.put(child, mark);
+            final ViewGroup childRef = child;
+            final int iconId = rc.getResources().getIdentifier("icon", "id", rc.getPackageName());
+
+            // 位置放在图标右上角；图标还没布局完就等一帧再算（只补一次，不循环）。
+            Runnable place = new Runnable() {
+                @Override public void run() {
+                    try {
+                        View icon = iconId != 0 ? childRef.findViewById(iconId) : null;
+                        int left, top;
+                        if (icon != null && icon.getWidth() > 0) {
+                            int[] il = new int[2];
+                            icon.getLocationInWindow(il);
+                            int[] cl = new int[2];
+                            childRef.getLocationInWindow(cl);
+                            left = il[0] - cl[0] + icon.getWidth() - size;
+                            top = il[1] - cl[1];
+                        } else {
+                            left = childRef.getWidth() - size - (int) (2f * d);
+                            top = (int) (2f * d);
+                        }
+                        if (left < 0) left = 0;
+                        if (top < 0) top = 0;
+                        // ViewOverlay 被裁在宿主 View 边界内：left/top 超出 child 宽高时
+                        // 标记会被裁掉（表现为"部分格子没有 ✕"）。这里夹回可见范围内。
+                        int cw = childRef.getWidth();
+                        int ch = childRef.getHeight();
+                        if (cw > 0 && left > cw - size) left = cw - size;
+                        if (ch > 0 && top > ch - size) top = ch - size;
+                        if (left < 0) left = 0;
+                        if (top < 0) top = 0;
+                        mark.setBounds(left, top, left + size, top + size);
+                        childRef.getOverlay().add(mark);
+                        childRef.invalidate();
+                    } catch (Throwable ignored) {}
+                }
+            };
+            if (child.getWidth() > 0) place.run(); else child.post(place);
         } catch (Throwable t) {
             MainModule.logMsg("[SBPlus] addDeleteMark error: " + t);
         }
     }
 
-    private static View hitRemoveMark(float rawX, float rawY) {
-        for (java.util.Map.Entry<View, View> e : sRemoveMarks.entrySet()) {
-            View mark = e.getValue();
-            if (mark.getVisibility() != View.VISIBLE) continue;
+    /** 命中检测：返回被点中的删除标记对应的条目位置，没点中返回 null。 */
+    private static Integer hitRemoveMark(float rawX, float rawY) {
+        for (java.util.Map.Entry<View, MarkDrawable> e : sRemoveMarks.entrySet()) {
+            View child = e.getKey();
+            MarkDrawable mark = e.getValue();
+            if (child == null || !child.isShown()) continue;
+            android.graphics.Rect b = mark.getBounds();
             int[] loc = new int[2];
-            mark.getLocationOnScreen(loc);
-            if (rawX >= loc[0] && rawX <= loc[0] + mark.getWidth()
-                    && rawY >= loc[1] && rawY <= loc[1] + mark.getHeight()) {
-                return mark;
+            child.getLocationOnScreen(loc);
+            if (rawX >= loc[0] + b.left && rawX <= loc[0] + b.right
+                    && rawY >= loc[1] + b.top && rawY <= loc[1] + b.bottom) {
+                return mark.pos;
             }
         }
         return null;
